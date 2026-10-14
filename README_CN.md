@@ -4,6 +4,10 @@
 
 [English](README.md) · [工作台使用说明](docs/research-workbench_CN.md) · [架构](docs/architecture_CN.md)
 
+![Brilliant Researcher 工作台：阶段进度、DSH 执行、Codex 审核与项目对话](docs/images/workbench-zh.png)
+
+*界面演示：项目、会话和进度均为虚构数据，不包含私人研究内容，也不代表真实 Agent 运行。*
+
 Brilliant Researcher 将研究目标、原生 coding agent、项目对话、研究阶段和成果放在同一个本地看板中。默认由 **DSH 执行、Codex 独立审核**：执行任务、检查实际成果、按审核意见返修，再继续推进。继续迭代或重做时，可以先让 Codex 审计现有成果并提出具体计划。
 
 本项目基于 [ARIS — Auto-claude-code-research-in-sleep](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep)，在 [upstream/aris](upstream/aris) 包含来源于该版本的 MIT 许可文件 [`2132036060e03e8d0df69a4b21e5971819c0c2d6`](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/tree/2132036060e03e8d0df69a4b21e5971819c0c2d6)。本次发布选取公开 ARIS 文件，并包含本地集成适配，不是完整未修改的上游 checkout。ARIS 提供研究技能和流程，BRI 增加本地工作台与 agent 协作能力。来源和许可见 [NOTICE](NOTICE) 与 [上游 LICENSE](upstream/aris/LICENSE)。

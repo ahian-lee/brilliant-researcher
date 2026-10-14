@@ -4,6 +4,10 @@
 
 [中文](README_CN.md) · [Workbench guide](docs/research-workbench.md) · [Architecture](docs/architecture.md)
 
+![Brilliant Researcher workbench: stage progress, DSH execution, Codex review, and project conversation](docs/images/workbench-en.png)
+
+*Interface preview with synthetic project, session, and progress data. No private research or real agent run is shown.*
+
 Brilliant Researcher brings research goals, native coding agents, project conversations, research stages, and deliverables into one local dashboard. The default collaboration pairs **DSH as executor** with **Codex as independent reviewer**: execute a task, review its actual artifacts, repair the findings, and keep iterating. A new request can begin with a Codex audit of existing work and a concrete plan.
 
 BRI builds on [ARIS — Auto-claude-code-research-in-sleep](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep). The included MIT-licensed files derive from [`2132036060e03e8d0df69a4b21e5971819c0c2d6`](https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep/tree/2132036060e03e8d0df69a4b21e5971819c0c2d6) in [upstream/aris](upstream/aris). This release vendors selected public ARIS files with local integration adaptations, rather than a pristine complete upstream checkout. ARIS supplies the research skills and workflows; BRI adds the workbench and agent coordination around them. See [NOTICE](NOTICE) and the [upstream license](upstream/aris/LICENSE).
