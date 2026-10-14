@@ -724,18 +724,39 @@ async function unknownEscalation() {
 
 async function budgetsAndConcurrency() {
   console.log('\n[11] 合并窗口、预算与全局并发上限');
-  const t = harness({ maxConcurrentDispatches: 1 });
-  createProject(t.db, { id: 'p1', goal: 'g' });
-  createProject(t.db, { id: 'p2', goal: 'g' });
-  const a = createWorkflow(t.db, { projectId: 'p1', goal: 'A' });
-  const b = createWorkflow(t.db, { projectId: 'p2', goal: 'B' });
-  const first = await t.queue.pump({ immediateWorkflowId: a.id });
-  check('全局上限为 1 时只唤醒一个主管回合', t.host.startTurns.length === 1, JSON.stringify(first.actions));
-  check('另一个项目排队而不是被一起唤醒', activeDispatch(t.db, b.id) === undefined);
-  check('等待原因写明并发上限', findWorkflow(t.db, b.id)?.waiting_reason === 'supervisor_concurrency_limit', findWorkflow(t.db, b.id)?.waiting_reason);
-  await closeDispatch(t, activeDispatch(t.db, a.id)?.id ?? '', 'p1');
-  await t.queue.pump();
-  check('前一条结束后下一条才派发', t.host.startTurns.length === 2 && activeDispatch(t.db, b.id) !== undefined);
+  // immediateWorkflowId bypasses the merge window; it does not prioritize that
+  // workflow. Exercise both queue orders explicitly instead of assuming that
+  // creation order wins when updated_at ties and random IDs break the tie.
+  for (const earlierProject of ['p1', 'p2']) {
+    const t = harness({ maxConcurrentDispatches: 1 });
+    try {
+      createProject(t.db, { id: 'p1', goal: 'g' });
+      createProject(t.db, { id: 'p2', goal: 'g' });
+      const a = createWorkflow(t.db, { projectId: 'p1', goal: 'A' });
+      const b = createWorkflow(t.db, { projectId: 'p2', goal: 'B' });
+      for (const workflow of [a, b]) {
+        t.db.prepare('UPDATE workflow_run SET updated_at=? WHERE id=?').run(
+          new Date(t.clock.now - (workflow.project_id === earlierProject ? 2 : 1)).toISOString(), workflow.id,
+        );
+      }
+      const first = await t.queue.pump({ immediateWorkflowId: a.id });
+      const sent = first.actions.filter(action => action.action === 'dispatched');
+      check('全局上限为 1 时只唤醒一个主管回合', sent.length === 1 && t.host.startTurns.length === 1 && countActiveDispatches(t.db) === 1, JSON.stringify(first.actions));
+      if (sent.length !== 1 || !sent[0].dispatchId) throw new Error(`Expected exactly one dispatch: ${JSON.stringify(first.actions)}`);
+      const running = [a, b].find(workflow => workflow.id === sent[0].workflowId);
+      if (!running) throw new Error(`Unexpected dispatched workflow: ${sent[0].workflowId}`);
+      const waiting = running.id === a.id ? b : a;
+      check('受控 fixture 覆盖两个项目先派发的情况', running.project_id === earlierProject);
+      check('活动派发与真实宿主调用属于同一项目', activeDispatch(t.db, running.id)?.id === sent[0].dispatchId && t.host.startTurns[0].workflowId === running.id);
+      check('另一个项目排队而不是被一起唤醒', activeDispatch(t.db, waiting.id) === undefined);
+      check('等待原因写明并发上限', findWorkflow(t.db, waiting.id)?.waiting_reason === 'supervisor_concurrency_limit', findWorkflow(t.db, waiting.id)?.waiting_reason);
+      await t.queue.pump();
+      check('前一回合仍活动时重复推进不能突破上限', t.host.startTurns.length === 1 && countActiveDispatches(t.db) === 1 && activeDispatch(t.db, waiting.id) === undefined);
+      await closeDispatch(t, sent[0].dispatchId, running.project_id);
+      await t.queue.pump();
+      check('前一条结束后下一条才派发', t.host.startTurns.length === 2 && activeDispatch(t.db, running.id) === undefined && activeDispatch(t.db, waiting.id) !== undefined && countActiveDispatches(t.db) === 1 && t.host.startTurns[1].workflowId === waiting.id);
+    } finally { t.db.close(); }
+  }
 
   const t2 = harness();
   createProject(t2.db, { id: 'p1', goal: 'g' });
