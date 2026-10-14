@@ -34,6 +34,8 @@ You can also start with a specific task instead of an audit. Free collaboration,
 Requirements: **Node.js 24**, npm, and **Python 3** for ARIS helpers. The backend runs TypeScript directly and uses `node:sqlite`; an older Node installation is insufficient. Git is needed to clone the repository.
 
 ```sh
+git clone https://github.com/ahian-lee/brilliant-researcher.git
+cd brilliant-researcher
 npm ci
 npm run setup
 npm run build

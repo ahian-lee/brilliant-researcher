@@ -34,6 +34,8 @@ flowchart LR
 需要 **Node.js 24**、npm，以及 ARIS 助手所需的 **Python 3**。后台直接执行 TypeScript 并使用 `node:sqlite`，旧版 Node 不满足要求。克隆仓库需要 Git。
 
 ```sh
+git clone https://github.com/ahian-lee/brilliant-researcher.git
+cd brilliant-researcher
 npm ci
 npm run setup
 npm run build
