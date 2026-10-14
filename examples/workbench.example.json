@@ -1,0 +1,9 @@
+{
+  "nativeUrl": "http://127.0.0.1:8793",
+  "projectBase": "var/projects",
+  "dshAutoReview": false,
+  "approvalReview": {
+    "enabled": false
+  },
+  "reviewer": {}
+}

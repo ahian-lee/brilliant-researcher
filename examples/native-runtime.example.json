@@ -1,0 +1,16 @@
+{
+  "port": 8793,
+  "sessionsDirectory": "var/native-sessions",
+  "dsh": {
+    "enabled": false,
+    "executable": "",
+    "cliEntry": "",
+    "home": "",
+    "profile": ""
+  },
+  "codex": {
+    "enabled": false,
+    "executable": "",
+    "home": ""
+  }
+}

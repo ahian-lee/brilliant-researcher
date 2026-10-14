@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "id": "my-research",
+      "name": "My research",
+      "root": "../../../../my-research",
+      "goal": "The research question and completion conditions agreed with the user",
+      "supervisor": "Pi / ARIS + independent reviewer"
+    }
+  ]
+}

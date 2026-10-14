@@ -1,0 +1,8 @@
+{
+  "projectId": "example-project",
+  "taskId": "example-task",
+  "runId": "example-run",
+  "verdict": "accepted",
+  "reason": "Synthetic example: the stated checks passed.",
+  "evidenceRef": "reports/example-checks.json"
+}

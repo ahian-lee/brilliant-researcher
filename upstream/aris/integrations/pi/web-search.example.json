@@ -1,0 +1,27 @@
+{
+  "searchProvider": "exa",
+  "workflow": "none",
+  "toolActivation": "eager",
+  "webSearch": {
+    "enabled": true,
+    "allowedProviders": ["exa"]
+  },
+  "fetch": {
+    "defaultMode": "readable",
+    "allowedModes": ["readable", "raw"]
+  },
+  "fetchRouting": {
+    "providers": ["http"],
+    "allowRemoteHostedProviders": false
+  },
+  "tools": {
+    "sourceCheck": { "enabled": false },
+    "getSearchContent": { "enabled": false }
+  },
+  "commands": {
+    "websearch": { "enabled": false },
+    "curator": { "enabled": false },
+    "search": { "enabled": false },
+    "google-account": { "enabled": false }
+  }
+}

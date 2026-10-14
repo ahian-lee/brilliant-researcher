@@ -1,0 +1,8 @@
+{
+  "projectId": "example-project",
+  "taskId": "example-task",
+  "runId": "example-failed-run",
+  "verdict": "rejected",
+  "reason": "Synthetic example: execution failed; no accepted artifact.",
+  "evidenceRef": "reports/example-error.txt"
+}

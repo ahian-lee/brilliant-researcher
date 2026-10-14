@@ -1,0 +1,20 @@
+{
+  "name": "bri-marketplace",
+  "interface": {
+    "displayName": "BRI Researcher"
+  },
+  "plugins": [
+    {
+      "name": "bri-research",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bri-research"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Research"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "projectId": "example-project",
+  "title": "Synthetic revision",
+  "brief": "Fix the example boundary described in the prior review and rerun the example tests.",
+  "cwd": "/tmp/brilliant-example",
+  "stage": "implementation",
+  "tools": "read,write,bash",
+  "timeoutMs": 60000,
+  "dependsOn": [
+    "example-task"
+  ],
+  "start": false
+}

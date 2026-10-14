@@ -1,0 +1,64 @@
+{
+  "name": "brilliant-researcher",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "controller": "node --enable-source-maps apps/controller/src/server.ts",
+    "dashboard": "vite apps/dashboard",
+    "test": "node tests/arisReader.ts && node tests/faultInjection.ts && node tests/workflowQueue.ts && node tests/codexSupervisorHost.ts && node tests/waitRuns.mjs && node tests/codexMcp.mjs && node tests/codexInstall.mjs && node tests/mcpIntegration.mjs",
+    "test:aris": "node tests/arisReader.ts",
+    "codex:install": "node integrations/codex/install.mjs",
+    "codex:uninstall": "node integrations/codex/install.mjs --uninstall",
+    "build": "vite build apps/dashboard",
+    "codex:verify": "node integrations/codex/verify-codex.mjs",
+    "test:workflow": "node tests/workflowQueue.ts && node tests/codexSupervisorHost.ts",
+    "test:dashboard": "node tests/researchFocus.ts && node tests/agentSessions.ts && node tests/arisReader.ts && node tests/arisObserverReload.mjs",
+    "test:workbench": "node tests/arisWorkspace.ts && node tests/researchWorkbench.ts && node tests/projectExport.ts && node tests/dshReadiness.ts && node tests/approvalCoordinator.ts && node tests/feishuNotifier.ts && node tests/nativeRuntime.ts && node tests/collaborationLoop.ts && node tests/iterationPlanning.ts && node tests/workbenchCollaboration.ts && node tests/workbenchRevisionRecovery.ts && node tests/nativeDshDriver.ts && node tests/nativeCodex.ts && node tests/reviewerSelection.ts",
+    "setup": "node scripts/setup.mjs",
+    "start": "node scripts/start.mjs",
+    "dev": "node scripts/start.mjs --dev",
+    "runtime": "node scripts/runtime.mjs",
+    "test:setup": "node tests/publicSetup.mjs",
+    "test:startup": "node tests/publicStartup.mjs",
+    "typecheck": "tsc --project apps/dashboard/tsconfig.json",
+    "test:compat": "node tests/paseoRuntime.ts",
+    "prepare:aris-dashboard": "node integrations/prepare-aris-dashboard.mjs",
+    "audit:release": "node scripts/audit-release.mjs",
+    "test:i18n": "node tests/dashboardI18n.mjs"
+  },
+  "dependencies": {
+    "fastify": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "5.9.3",
+    "vite": "^6.0.7"
+  },
+  "version": "0.1.0",
+  "description": "An ARIS-based agent research workbench with native coding agents, independent review and continued iteration.",
+  "license": "MIT",
+  "author": "ahian-lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahian-lee/brilliant-researcher.git"
+  },
+  "homepage": "https://github.com/ahian-lee/brilliant-researcher#readme",
+  "bugs": {
+    "url": "https://github.com/ahian-lee/brilliant-researcher/issues"
+  },
+  "keywords": [
+    "aris",
+    "research-agent",
+    "coding-agents",
+    "codex",
+    "dsh",
+    "research-workbench"
+  ]
+}

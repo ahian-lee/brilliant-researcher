@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { main, makeConfig } from '../integrations/codex/install.mjs';
+import { readRegistration } from '../integrations/codex/verify-codex.mjs';
+const input = '# keep\nmodel = "existing"\n[mcp_servers.other]\nargs = ["a", "b"]\ncommand = "unchanged"\n\n[plugins."bri-research@bri-marketplace"]\nenabled = true\n\n[plugins."other@market"]\nenabled = true\n';
+const next = makeConfig(input, { node: '/node path/node', server: '/repo path/server.mjs' });
+assert.ok(next.includes('[mcp_servers.other]\nargs = ["a", "b"]\ncommand = "unchanged"'));
+assert.ok(next.includes('[plugins."other@market"]\nenabled = true'));
+assert.ok(next.includes('[plugins."bri-research@bri-marketplace"]\nenabled = false'));
+assert.equal(makeConfig(next, { node: '/node path/node', server: '/repo path/server.mjs' }), next);
+assert.equal(readRegistration(next).command, '/node path/node');
+assert.deepEqual(readRegistration(next).args, ['/repo path/server.mjs']);
+const home = mkdtempSync(join(tmpdir(), 'bri-install-test-'));
+try {
+ const config = join(home, 'config.toml'); writeFileSync(config, input);
+ main([`--codex-home=${home}`, '--dry-run']); assert.equal(readFileSync(config, 'utf8'), input);
+ main([`--codex-home=${home}`, '--uninstall', '--dry-run']); assert.equal(readFileSync(config, 'utf8'), input);
+ assert.ok(!existsSync(join(home, 'skills')));
+ main([`--codex-home=${home}`]); const installed = readFileSync(config, 'utf8');
+ assert.ok(existsSync(join(home, 'skills/bri-supervisor/SKILL.md')));
+ assert.ok(existsSync(join(home, 'skills/bri-supervisor/references/connection.md')));
+ main([`--codex-home=${home}`]); assert.equal(readFileSync(config, 'utf8'), installed);
+ main([`--codex-home=${home}`, '--uninstall']);
+ const removed = readFileSync(config, 'utf8');
+ assert.ok(!removed.includes('[mcp_servers.bri]')); assert.ok(removed.includes('[mcp_servers.other]'));
+ assert.ok(!existsSync(join(home, 'skills/bri-supervisor/SKILL.md')));
+ console.log('Installer: config preservation, idempotence, dry-run, skill discovery and uninstall passed');
+} finally { rmSync(home, { recursive: true, force: true }); }

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codex": {
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["ARIS_ROOT/integrations/pi/codex-server.py"],
+      "lifecycle": "eager"
+    }
+  }
+}

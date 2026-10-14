@@ -1,0 +1,27 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+# Local state, credentials, sessions, research and developer output
+var/
+projects/
+/research-*/
+output/
+.playwright-cli/
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.yaml
+*.local.yml
+*.db
+*.db-shm
+*.db-wal
+*.log
+.bri/
+.aris/
+.pi/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

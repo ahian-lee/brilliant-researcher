@@ -1,0 +1,31 @@
+Brilliant Researcher (BRI)
+Copyright (c) 2026 ahian-lee and Brilliant Researcher contributors.
+
+1. ARIS — Auto-claude-code-research-in-sleep
+   https://github.com/wanshuiyin/Auto-claude-code-research-in-sleep
+   Source snapshot: 2132036060e03e8d0df69a4b21e5971819c0c2d6
+   Copyright (c) 2026 wanshuiyin. MIT License.
+   Included public source files are in upstream/aris; its LICENSE is retained.
+   The root workflows/ adaptations also derive from ARIS.
+   The upstream Pi and Dashboard integrations included here are local Brilliant
+   Researcher adaptations, not files claimed to originate at that snapshot.
+   Ambiguous credential examples are normalized to explicit placeholders.
+   Personal ARIS runtime data, paper collections and nonessential media are not
+   distributed. Consult the original repository for its full distribution.
+
+2. Standalone DSH JSONL bridge
+   https://github.com/Jecvay/paseo-dsh-direct
+   Original npm package: paseo-dsh-direct@0.2.2
+   Original npm manifest gitHead: 9894df9724d0e5e6acab7cdcf9fd96c612a631d6
+   Copyright (c) 2026 Jecvay. MIT License.
+   Adapted standalone source is embedded in
+   packages/adapters/src/native/dshBridgeSource.ts. The original copyright and
+   full MIT text are retained there and in licenses/PASEO-DSH-DIRECT-MIT.txt.
+   This attribution does not imply a runtime dependency on Paseo. BRI invokes
+   native DSH and Codex and does not install or connect to a Paseo daemon.
+
+3. Dependencies
+   Fastify, React, React DOM, Vite and development dependencies are installed
+   through npm, rather than vendored as installed packages. Their original
+   licenses remain with their respective packages. DSH and Codex are external
+   runtimes installed and authenticated by the user.

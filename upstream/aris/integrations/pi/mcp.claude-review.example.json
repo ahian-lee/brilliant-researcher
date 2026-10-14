@@ -1,0 +1,12 @@
+{
+  "_说明": "显式改换 reviewer 时才用这个：把 integrations/pi/mcp.json.example 换成本文件内容即可。上游默认 reviewer 是 Codex（mcp-servers/codex-exec），本文件让 Claude Code 当 reviewer，属于偏离默认配置的显式选择，需在研究记录里写明评审来源。",
+  "mcpServers": {
+    "claude-review": {
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["ARIS_ROOT/mcp-servers/claude-review/server.py"],
+      "env": { "CLAUDE_REVIEW_SERVER_NAME": "claude-review" },
+      "lifecycle": "eager"
+    }
+  }
+}
