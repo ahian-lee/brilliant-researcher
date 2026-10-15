@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,renameSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {configureConnection,executableCandidates} from '../scripts/connect.mjs';
+import {setup} from '../scripts/setup.mjs';
+const root=mkdtempSync(join(tmpdir(),'bri-connect-'));
+try{
+  setup(root);const agent=join(root,process.platform==='win32'?'codex.exe':'codex');writeFileSync(agent,'fixture');
+  assert.ok(executableCandidates('codex',root).includes(agent));
+  const projectFile=join(root,'var/aris-projects.local.json');writeFileSync(projectFile,'{"projects":[{"id":"existing"}]}');const projectBytes=readFileSync(projectFile,'utf8');
+  const runtimeFile=join(root,'var/native-runtime.local.json');const settings=JSON.parse(readFileSync(runtimeFile,'utf8'));settings.custom={preserved:true};writeFileSync(runtimeFile,JSON.stringify(settings));
+  assert.equal(configureConnection(root,{provider:'codex',executable:agent,port:13459}).nativeUrl,'http://127.0.0.1:13459');
+  assert.equal(JSON.parse(readFileSync(runtimeFile,'utf8')).custom.preserved,true);
+  assert.equal(JSON.parse(readFileSync(join(root,'var/workbench.local.json'),'utf8')).nativeUrl,'http://127.0.0.1:13459');
+  assert.equal(readFileSync(projectFile,'utf8'),projectBytes,'connecting an agent preserves project registration exactly');
+  const cliEntry=join(root,'codex-cli.js');writeFileSync(cliEntry,'// fixture entry');
+  configureConnection(root,{provider:'codex',executable:agent,cliEntry,port:13459});
+  assert.equal(JSON.parse(readFileSync(runtimeFile,'utf8')).codex.cliEntry,cliEntry,'Codex npm entry is supported as well as a native binary');
+  configureConnection(root,{provider:'codex',executable:agent,port:13459});
+  assert.equal(JSON.parse(readFileSync(runtimeFile,'utf8')).codex.cliEntry,cliEntry,'omitted entry preserves existing configuration');
+  const wrapper=join(root,'codex.cmd');writeFileSync(wrapper,'@echo off');
+  assert.throws(()=>configureConnection(root,{provider:'codex',executable:wrapper}),/node\.exe/);
+  const before=readFileSync(runtimeFile,'utf8');assert.throws(()=>configureConnection(root,{provider:'dsh',executable:agent,port:0}));assert.equal(readFileSync(runtimeFile,'utf8'),before);
+  const workbenchFile=join(root,'var/workbench.local.json'),workbenchBefore=readFileSync(workbenchFile,'utf8');let renames=0;
+  assert.throws(()=>configureConnection(root,{provider:'codex',executable:agent,port:13460},{rename(from,to){if(++renames===2)throw Error('simulated second-file I/O failure');renameSync(from,to);}}),/second-file/);
+  assert.equal(readFileSync(runtimeFile,'utf8'),before,'failed paired configuration restores runtime exactly');
+  assert.equal(readFileSync(workbenchFile,'utf8'),workbenchBefore,'failed paired configuration preserves workbench exactly');
+  console.log('connection setup PASS: discovery, synchronized ports, existing state preservation, invalid input has no write or model call');
+}finally{rmSync(root,{recursive:true,force:true});}

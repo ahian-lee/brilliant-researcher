@@ -8,6 +8,12 @@ param(
 $ErrorActionPreference='Stop'
 $Root=Split-Path $PSScriptRoot -Parent
 $TaskName="Brilliant-Researcher-Native-Runtime-$Port"
+# Keep an existing installation's task identity during upgrades. An unrelated
+# installation with the same port must not be adopted or stopped.
+$LegacyTask=Get-ScheduledTask -TaskName "BRI-Native-Runtime-$Port" -ErrorAction SilentlyContinue
+if($LegacyTask -and [string]$LegacyTask.Actions[0].Arguments -like "*$(Join-Path $PSScriptRoot 'native-runtime-host.ts')*"){
+  $TaskName=$LegacyTask.TaskName
+}
 if($Action -eq 'status'){
   $task=Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   if($task){$task | Select-Object TaskName,State | ConvertTo-Json -Compress}else{Write-Output 'No registered native runtime task'}

@@ -326,3 +326,21 @@
 @media (max-width:900px) { .wb-briefing-grid { grid-template-columns:1fr; gap:16px; } }
 
 .wb-briefing-source { font-size:12px; color:#60786b; margin:8px 0; }
+
+.wb-budget-fields { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+.wb-project-budget > summary, .wb-new-project-budget > summary { cursor: pointer; }
+.wb-project-budget .wb-form { margin-top: 14px; }
+.wb-session-usage { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px 14px; margin: 10px 0; font-size: 12px; }
+.wb-session-usage div { min-width: 0; }
+.wb-session-usage dt { color: var(--muted); font-weight: 400; }
+.wb-session-usage dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.wb-session-metadata details, .wb-chat-session-meta { font-size: 12px; margin: 8px 0; }
+.wb-iteration-results, .wb-direction-sync { border-top: 1px solid var(--line, #dce5df); margin-top: 14px; padding-top: 12px; }
+.wb-result-links { margin: 8px 0; padding-left: 18px; overflow-wrap: anywhere; }
+.wb-result-links a { color: var(--accent, #17654d); }
+.wb-result-review, .wb-direction-sync p, .wb-current-step { margin: 8px 0; font-size: 13px; }
+.wb-direction-sync { font-size: 12px; }
+.wb-reviewer-repair { margin: 10px 14px; padding: 12px; background: #fff7dc; border: 1px solid #e8dba9; border-radius: 8px; }
+.wb-automatic-requests { margin: 12px 0; padding: 10px; background: #f4f7f5; border-radius: 8px; }
+.wb-plan-evidence .wb-plan-sections { margin-top: 12px; }
+@media (max-width: 640px) { .wb-budget-fields { grid-template-columns: 1fr; } }

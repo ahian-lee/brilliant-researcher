@@ -1,6 +1,10 @@
 import { useI18n, translate as tr } from '../i18n';
 import { useEffect, useId, useRef, useState } from 'react';
 import { configureWorkbenchSession, createWorkbenchSession, fetchWorkbenchSession, interruptWorkbenchSession, sendWorkbenchMessage } from '../workbenchApi';
+import { summarizeAttention } from '../attention';
+import { SessionMetadata } from './SessionMetadata';
+import { DirectionSync } from './DirectionSync';
+import { ReplyProgress, sessionProgress } from '../sessionProgress';
 import { ProjectAttention } from './ProjectAttention';
 import type { Async } from '../hooks/useAsync';
 import type { fetchWorkbenchAttention } from '../workbenchApi';
@@ -79,17 +83,18 @@ function SessionConfiguration({ projectId, session, editable, blockedReason, onB
   </form>;
 }
 
-function ChatConversation({ projectId, sessionId, sessions, onNewSession, collaboration, onCollaborationChanged, questions, attention, focus, requestOpen, onOpenSession, iterationStages=[], iterationRequest, defaultAuditFirst=false }: { projectId: string; sessionId: string; sessions: WorkbenchSession[]; onNewSession: () => void; questions: NonNullable<Overview['focus']>['questions']; collaboration?: WorkbenchCollaborationRun | null; onCollaborationChanged?: () => void } & AttentionProps): JSX.Element {
+function ChatConversation({ projectId, sessionId, sessions, onNewSession, collaboration, onCollaborationChanged, questions, attention, focus, requestOpen, onOpenSession, onReviewerCreated, iterationStages=[], iterationRequest, defaultAuditFirst=false }: { projectId: string; sessionId: string; sessions: WorkbenchSession[]; onNewSession: () => void; onReviewerCreated:(session:WorkbenchSession)=>void; questions: NonNullable<Overview['focus']>['questions']; collaboration?: WorkbenchCollaborationRun | null; onCollaborationChanged?: () => void } & AttentionProps): JSX.Element {
   const { t: tr, locale } = useI18n();
   const [panel,setPanel]=useState<'activity'|'chat'|'requests'>(requestOpen ? 'requests' : 'activity');
   useEffect(()=>{if(requestOpen)setPanel('requests');},[requestOpen]);
-  const requestCount = questions.length + (attention.data?.pending??[]).reduce((n,row)=>n+(row.approvals?.length??0),0);
+  const {humanCount:requestCount,automaticCount}=summarizeAttention(attention.data?.pending??[],questions.length);
   const [revision, setRevision] = useState(0);
   const [text, setText] = useState('');
   const [iteration,setIteration]=useState('');
   const [auditFirst,setAuditFirst]=useState(defaultAuditFirst);
   useEffect(()=>{setAuditFirst(defaultAuditFirst);},[defaultAuditFirst]);
-  useEffect(()=>{if(iterationRequest?.key){setIteration(iterationRequest.scope);setAuditFirst(true);setText('请检查已有成果，提出改进建议并继续迭代。');setPanel('chat');setHandoff(null);}},[iterationRequest?.key]);
+  useEffect(()=>{if(iterationRequest?.key){setIteration(iterationRequest.scope);setAuditFirst(true);setText(previous=>previous.trim()?previous:tr('请检查已有成果，提出改进建议并继续迭代。'));setPanel('chat');setHandoff(null);}},[iterationRequest?.key]);
+  const [repairBusy,setRepairBusy]=useState(false);
   const [pending, setPending] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
@@ -115,12 +120,15 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
   const currentSession = state.data?.session ?? sessions.find(session=>session.id===sessionId);
   const bound = !!collaboration && [collaboration.executorSessionId, collaboration.reviewerSessionId].includes(sessionId);
   const canPlan=bound || !collaboration && sessions.some(s=>s.id===sessionId&&s.role==='executor') && sessions.some(s=>s.role==='reviewer'&&s.provider==='codex');
-  const canIterate=iterationStages.length>0 && canPlan;
-  const canSend = (!!text.trim() || canPlan && auditFirst && !!iterationRequest?.key) && !pending && !configBusy && !action && !!currentSession && currentSession.status !== 'archived';
+  const canIterate=iterationStages.length>0;
+  const reviewerMissing=!canPlan && (!!iteration || !!iterationRequest?.key);
+  const canSend = (!!text.trim() || canPlan && auditFirst && !!iterationRequest?.key) && !reviewerMissing && !repairBusy && !pending && !configBusy && !action && !!currentSession && currentSession.status !== 'archived';
   const canHandoff = !!handoff && !!target && !!handoffInstruction.trim() && !pending && !configBusy && !action;
   const approvals = state.data?.approvals ?? [];
-  const permissionDenied = approvals.some(request => state.data?.approvalReviews?.some(review => review.approvalId === request.id && review.state === 'human_required'));
-  const waitingLabel = approvals.some(request => request.kind === 'question') ? tr("需要回答问题") : permissionDenied ? tr("操作被拒绝 · 待处理") : approvals.length ? tr("操作权限待处理") : sessionStatus(state.data?.session?.status);
+  const {humanCount:sessionHumanCount,automaticCount:sessionAutomaticCount}=summarizeAttention(state.data?[state.data]:[],0);
+  const generating = currentSession ? sessionProgress(currentSession,messages,state.data?.activity).generating : false;
+  const waitingLabel = sessionHumanCount && approvals.length ? tr('需要你处理') : sessionAutomaticCount ? tr('自动审核操作权限中') : generating ? tr('正在生成回复') : sessionStatus(currentSession?.status);
+
   const loopActive = bound && !['paused', 'accepted', 'audited', 'budget_exhausted', 'needs_attention'].includes(collaboration!.state);
   const canConfigure = !loopActive && !!currentSession && ['idle', 'stopped', 'completed', 'succeeded', 'failed', 'error', 'canceled', 'interrupted'].includes(currentSession.status) && !approvals.length && !pending && !action;
   const configBlockedReason = loopActive ? collaboration?.state === 'planning' ? tr("Codex 正在审计规划，请先暂停协作再更换模型。") : tr("请先暂停自动协作，再更换模型。") : approvals.length || ['starting', 'queued', 'running', 'waiting_input', 'waiting'].includes(currentSession?.status || '') ? tr("当前回合正在运行或等待审批，请先结束当前回合后调整。") : pending || action ? tr("请等待当前操作结束后调整。") : tr("当前会话状态尚未确认空闲，暂不能保存配置。");
@@ -129,9 +137,10 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
     event.preventDefault();
     const message = text.trim();
     if (!canSend || sending.current) return;
+    if((iteration||iterationRequest?.key)&&!canPlan){setError('阶段重做需要独立审核会话，请先修复审核连接。');return;}
     sending.current = true; setPending(true); setError(''); setNotice('');
     try {
-      const result = await sendWorkbenchMessage(projectId, sessionId, message, canIterate ? iteration || undefined : undefined, canPlan ? auditFirst : undefined);
+      const result = await sendWorkbenchMessage(projectId, sessionId, message, iteration || undefined, canPlan ? auditFirst : undefined);
       if (!active.current) return;
       if (!result.accepted) throw new Error(result.error || tr("消息未被接收，请重试。"));
       setText(''); setIteration(''); setNotice(canPlan && auditFirst ? "已交给 Codex 审计规划；范围内的计划会自动进入 DSH 执行与独立审核。" : bound ? "本轮要求已接收，执行与审核会按新要求推进；阶段进度会随执行更新。" : "消息已接收；执行结果将在会话中更新。"); setRevision((n) => n + 1);
@@ -170,6 +179,10 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
     {(requestCount)>0 && panel!=='requests' ? <button type="button" className="wb-pending-banner" onClick={()=>setPanel('requests')}>{requestCount}  {tr("项需要查看 · 点击回答或处理 →")}</button> : null}
     <div className="wb-chat-body" data-testid="session-content">
     <div className="wb-chat-status"><strong>{waitingLabel}</strong><span>{currentSession?.provider==='dsh-pi'?'DSH':currentSession?.provider==='codex'?'Codex':currentSession?.provider}</span></div>
+    {currentSession ? <ReplyProgress session={currentSession} messages={messages} activity={state.data?.activity}/> : null}
+    {automaticCount && !requestCount ? <p className="wb-muted" role="status">{tr('自动审核进行中 · {0}',{0:automaticCount})} · {tr('当前无需你批准。')}</p> : null}
+    {currentSession?<details className="wb-chat-session-meta"><summary>{tr('会话归属与用量')}</summary><SessionMetadata session={currentSession} sessions={sessions} onOpenSession={onOpenSession}/></details>:null}
+    {bound && collaboration?<DirectionSync run={collaboration}/>:null}
     <p className="wb-chat-collaboration">{bound ? tr("消息会同步执行与审核会话。") : tr("消息发送给当前选择的会话。")}{currentSession?.permissionPreset==='danger-full-access'||currentSession?.modeId==='full-access' ? tr(" 项目范围内自主执行。") : ''}</p>
     {panel==='activity' ? <section className="wb-activity-feed" aria-label={tr("当前会话动态")}><h3>{tr("最近在做什么")}</h3>{(state.data?.activity??[]).length ? <ol>{[...(state.data?.activity??[])].reverse().map(item=><li key={item.id}><div><strong>{item.summary}</strong><span>{item.status==='completed'?tr("操作已结束"):item.status==='failed'?tr("操作失败"):['running','in_progress','pending'].includes(item.status||'')?tr("正在执行"):tr("已记录")}</span></div>{item.at ? <time>{new Date(item.at).toLocaleTimeString(locale)}</time> : null}{item.target ? <p className="wb-activity-target">{item.target}</p> : null}{item.error ? <p className="wb-error">{item.error}</p> : null}{item.description && item.description!==item.summary ? <details><summary>{tr("执行者的原始说明")}</summary><p>{item.description}</p></details> : null}</li>)}</ol> : <p className="wb-muted">{state.loading?tr("正在读取最近活动…"):currentSession?.status==='idle'?tr("此会话当前没有正在执行的操作。"):tr("会话运行中，执行端尚未提供工具活动。")}</p>}{lastAssistant ? <details><summary>{tr("最近一次文字汇报")}</summary><ChatMessage message={lastAssistant}/></details> : null}</section> : null}
     {panel==='chat' ? <div className="wb-chat-messages" aria-label={tr("会话消息")}>{messages.filter(message=>message.text.trim()).map(message=>{const automatic=collaboration?.actions.find(action=>action.prompt&&message.text.endsWith(action.prompt));return <ChatMessage key={message.id} message={message} automatic={automatic ? automatic.kind==='plan'?tr("Codex 审计规划任务"):automatic.kind==='sync'?tr("同步项目调整"):automatic.kind==='review'?tr("发起独立审核"):tr("派发执行任务"):undefined}/>;})}{!messages.some(message=>message.text.trim()) ? <p className="wb-muted">{tr("尚无文字消息，可以在下方发送任务。")}</p> : null}<div ref={end}/></div> : null}
@@ -178,6 +191,14 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
     <details className="wb-chat-more"><summary>{tr("更多操作")}</summary><button type="button" className="wb-text-button" disabled={bound || pending || !!action} onClick={()=>void runAction('interrupt',()=>interruptWorkbenchSession(projectId,sessionId),'已请求停止当前回合。')}>{tr("停止当前会话")}</button><button type="button" className="wb-text-button" disabled={bound || !lastAssistant || pending} onClick={()=>{if(lastAssistant){setHandoff({id:lastAssistant.id,text:lastAssistant.text});setTargetId('');setHandoffInstruction('');}}}>{tr("手动交接给其他会话")}</button>{bound ? <p>{tr("自动协作会统一处理暂停和交接。")}</p> : null}<button className="wb-text-button" type="button" onClick={onNewSession}>{tr("新建工作会话")}</button></details>
     {state.error || state.data?.error || error ? <p className="wb-error" role="alert">{error || state.data?.error || state.error?.message}</p> : null}{notice ? <p className="wb-notice" role="status">{tr(notice)}</p> : null}
     </div>
+    {reviewerMissing?<section className="wb-reviewer-repair" role="alert"><p>{tr('阶段重做需要独立审核会话，请先修复审核连接。')}</p><p className="wb-muted">{tr('已保留所选阶段与草稿。创建空闲审核会话不会启动模型；完成后再发送本轮要求。')}</p><button type="button" className="wb-button" disabled={repairBusy||pending} onClick={()=>{
+      if(repairBusy)return;setRepairBusy(true);setError('');
+      createWorkbenchSession(projectId,{provider:'codex',role:'reviewer',workflow:'free',idle:true}).then(result=>{
+        if(!active.current)return;
+        if(!result.session)throw new Error(result.error||tr('服务未返回新会话。'));
+        onReviewerCreated(result.session);onOpenSession(sessionId);setNotice('空闲审核会话已连接，可继续发送。');
+      }).catch(err=>{if(active.current)setError(err instanceof Error?err.message:String(err));}).finally(()=>{if(active.current)setRepairBusy(false);});
+    }}>{repairBusy?tr('正在连接审核会话…'):tr('创建空闲 Codex 审核会话')}</button></section>:null}
     {panel==='requests' ? <p className="wb-request-footer">{requestCount ? tr("请填写对应问题并使用它的提交按钮。普通消息请切换到「对话」。") : tr("没有待处理事项。可切换到「动态」看进展，或到「对话」补充要求。")}</p> : handoff && !bound ? <form className="wb-chat-compose wb-handoff" onSubmit={(event) => void submitHandoff(event)}><div className="wb-section-heading"><strong>{tr("交给另一个会话")}</strong><button type="button" className="wb-icon-button" aria-label={tr("取消交接")} onClick={() => setHandoff(null)} disabled={pending || configBusy}>×</button></div><details><summary>{tr("查看将引用的最后一条 Agent 回复")}</summary><blockquote>{handoff.text}</blockquote></details>{targets.length ? <><label htmlFor="handoff-target">{tr("接收会话")}<select id="handoff-target" value={targetId} onChange={(event) => setTargetId(event.target.value)} disabled={pending || configBusy} required><option value="">{tr("选择本项目的另一个会话")}</option>{targets.map((session) => <option key={session.id} value={session.id}>{session.title || session.id} · {session.provider} · {sessionStatus(session.status)}</option>)}</select></label><label htmlFor="handoff-instruction">{tr("交接说明")}<textarea id="handoff-instruction" rows={3} value={handoffInstruction} onChange={(event) => setHandoffInstruction(event.target.value)} onKeyDown={(event) => submitOnEnter(event, canHandoff)} aria-describedby="handoff-keyboard-hint" disabled={pending || configBusy} required placeholder={tr("希望对方如何处理这些成果？例如：审核实现，补充测试，或继续绘图。")} /></label><div><span className="wb-muted" id="handoff-keyboard-hint">{tr("Enter 发送 · Shift+Enter 换行")}</span><button type="submit" className="wb-button primary" disabled={!canHandoff}>{pending ? tr("发送中…") : tr("发送交接")}</button></div></> : <p className="wb-muted">{tr("本项目还没有其他可接收的会话。")}<button type="button" className="wb-text-button" onClick={onNewSession}>{tr("先新建一个会话")}</button></p>}</form> : <form className="wb-chat-compose" onSubmit={(event) => void submit(event)}>{canIterate ? <label className="wb-iteration-choice" htmlFor="iteration-scope">{tr("本轮修改范围")}<select id="iteration-scope" value={iteration} disabled={pending || configBusy} onChange={event=>{setIteration(event.target.value);if(event.target.value)setAuditFirst(true);}}><option value="">{tr("按消息内容继续")}</option><option value="all">{tr("从头重做已启用的流程")}</option><optgroup label={tr("从某一步往后重做")}>{iterationStages.map(stage=><option key={stage.id} value={`from:${stage.id}`}>{tr("从「")}{tr(stage.name)}{tr("」继续")}</option>)}</optgroup><optgroup label={tr("只重做某一步")}>{iterationStages.map(stage=><option key={stage.id} value={`only:${stage.id}`}>{tr("只重做「")}{tr(stage.name)}」</option>)}</optgroup></select>{iteration ? <small>{tr("可以补充改进要求，也可以直接发送，交给 Codex 提出建议。旧轮次保留。")}</small> : null}</label> : null}{canPlan ? <label className="wb-audit-choice"><input type="checkbox" checked={auditFirst} disabled={pending || configBusy} onChange={event=>setAuditFirst(event.target.checked)}/><span>{tr("Codex 先审计并提出计划")}<small>{auditFirst ? tr("范围内自动执行；范围、费用或方向需要选择时再请你决定。") : tr("按下方指定任务直接执行，完成后仍由 Codex 审核。")}</small></span></label> : null}<label className="wb-sr-only" htmlFor="chat-message">{bound ? tr("调整项目方向，同步执行与审核") : tr("发消息给当前 agent")}</label><textarea id="chat-message" rows={3} value={text} onChange={(event) => setText(event.target.value)} onKeyDown={(event) => submitOnEnter(event, canSend)} aria-describedby="chat-keyboard-hint" disabled={pending || configBusy} placeholder={auditFirst && canPlan ? tr("可以只说继续迭代，也可以补充改进要求…") : iteration ? tr("哪里不满意？希望重新考虑什么？") : tr("补充要求、调整方向，或说明哪里需要重做…")} /><div><span className="wb-muted" id="chat-keyboard-hint">{tr("Enter 发送 · Shift+Enter 换行")}</span><button type="submit" className="wb-button primary" disabled={!canSend}>{pending ? tr("发送中…") : tr("发送")}</button></div></form>}
   </>;
 }
@@ -220,7 +241,7 @@ export function ChatPanel({ projectId, sessions, selectedId, onSelect, onStarted
   useEffect(() => { if (iterationRequest?.key) setCreating(false); }, [iterationRequest?.key]);
   return <aside className="wb-chat" id="wb-chat-panel" aria-label={tr("项目对话")}>
     <div className="wb-chat-heading"><div><span className="wb-eyebrow">{tr("随时协作")}</span><h2>{tr("项目对话")}</h2></div><button type="button" className="wb-icon-button" onClick={onCollapse} aria-label={tr("收起对话区")}>→</button></div>
-    <div className="wb-session-picker"><label className="wb-sr-only" htmlFor="chat-session">{tr("当前会话")}</label><select id="chat-session" value={selectedId} onChange={(event) => onSelect(event.target.value)} disabled={!sessions.length}><option value="">{tr("选择会话")}</option>{sessions.map((session) => <option key={session.id} value={session.id}>{session.provider==='dsh-pi'?'DSH':session.provider==='codex'?'Codex':session.provider} · {session.role==='reviewer'?tr('审核'):tr("执行")} · {sessionStatus(session.status)}</option>)}</select><button type="button" className="wb-button" onClick={() => setCreating((value) => !value)} aria-expanded={creating}>{tr("＋ 新会话")}</button></div>
-    {creating ? <StartSessionForm projectId={projectId} onCancel={() => setCreating(false)} onStarted={(session, error) => { setCreating(false); onStarted(session, error); }} /> : selectedId ? <ChatConversation defaultAuditFirst={defaultAuditFirst} iterationStages={iterationStages} iterationRequest={iterationRequest} key={`${projectId}:${selectedId}`} projectId={projectId} sessionId={selectedId} sessions={sessions} onNewSession={() => setCreating(true)} questions={questions} attention={attention} focus={focus} requestOpen={requestOpen} onOpenSession={onOpenSession} collaboration={collaboration} onCollaborationChanged={onCollaborationChanged} /> : <div className="wb-empty">{loading ? tr("正在读取项目会话与当前状态…") : tr("选择一个已有会话，或新建会话开始协作。")}</div>}
+    <div className="wb-session-picker"><label className="wb-sr-only" htmlFor="chat-session">{tr("当前会话")}</label><select id="chat-session" value={selectedId} onChange={(event) => onSelect(event.target.value)} disabled={!sessions.length}><option value="">{tr("选择会话")}</option>{sessions.map((session) => <option key={session.id} value={session.id}>{session.delegation?.parentSessionId?'↳ ':''}{session.title || session.id} · {session.provider==='dsh-pi'?'DSH':session.provider==='codex'?'Codex':session.provider} · {session.role==='reviewer'?tr('审核'):tr("执行")} · {sessionStatus(session.status)}</option>)}</select><button type="button" className="wb-button" onClick={() => setCreating((value) => !value)} aria-expanded={creating}>{tr("＋ 新会话")}</button></div>
+    {creating ? <StartSessionForm projectId={projectId} onCancel={() => setCreating(false)} onStarted={(session, error) => { setCreating(false); onStarted(session, error); }} /> : selectedId ? <ChatConversation defaultAuditFirst={defaultAuditFirst} iterationStages={iterationStages} iterationRequest={iterationRequest} key={`${projectId}:${selectedId}`} projectId={projectId} sessionId={selectedId} sessions={sessions} onNewSession={() => setCreating(true)} onReviewerCreated={onStarted} questions={questions} attention={attention} focus={focus} requestOpen={requestOpen} onOpenSession={onOpenSession} collaboration={collaboration} onCollaborationChanged={onCollaborationChanged} /> : <div className="wb-empty">{loading ? tr("正在读取项目会话与当前状态…") : tr("选择一个已有会话，或新建会话开始协作。")}</div>}
   </aside>;
 }

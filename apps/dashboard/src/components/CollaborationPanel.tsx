@@ -2,6 +2,7 @@ import { useI18n } from '../i18n';
 import { useId, useRef, useState } from 'react';
 import { pauseWorkbenchCollaboration, startWorkbenchCollaboration, workbenchArtifactUrl } from '../workbenchApi';
 import type { WorkbenchCollaborationRun } from '../workbenchTypes';
+import { DirectionSync } from './DirectionSync';
 import { AgentFields, type AgentSelection } from './NewResearchDialog';
 
 const labels: Record<WorkbenchCollaborationRun['state'], string> = {
@@ -68,6 +69,7 @@ export function CollaborationPanel({ projectId, run, allowStart, onChanged, onOp
   };
   return <section className="wb-card wb-loop" aria-label={tr("自动协作状态")}>
     <div className="wb-section-heading"><div><span className="wb-eyebrow">{tr("执行 → Codex 审核 → 自动返修")}</span><h2>{tr("自动协作")}</h2></div><span className="wb-status" role="status">{tr(labels[run.state])}</span></div>
+    <DirectionSync run={run}/>
     <p className="wb-muted">{tr("第")} {run.round || 1}  {tr("轮 · 已返修")} {run.revisionsUsed} / {run.maxRevisions}  {tr("次 · 方向版本")} {run.revision}</p>
     <details className="wb-loop-detail"><summary>{tr("本轮任务与最新要求")}</summary><p className="wb-project-instruction">{direction?.text || run.task}</p></details>
     <div className="wb-loop-participants">{([{ id: run.executorSessionId, label: tr("执行会话") }, { id: run.reviewerSessionId, label: tr("Codex 审核会话") }]).map((item) => <button key={item.id} className="wb-collaboration-session" type="button" onClick={() => onOpenSession(item.id)}><div><strong>{tr(item.label)} ↗</strong><span>{syncStatus(item.id)}</span></div></button>)}</div>

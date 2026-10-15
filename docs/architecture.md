@@ -46,6 +46,18 @@ The runtime uses native DSH and Codex session identifiers and events. Each DSH s
 
 Ordinary work can proceed inside the declared project scope. Questions about scope, cost, resources or direction remain user decisions. Permission review and user questions use the existing project conversation. Broad runtime capability, including full access, does not grant additional user authorization.
 
+### Parent and child lifecycle
+
+The native collaboration bridge exposes `create_agent`, `get_agent`, `wait_agent` and `send_agent_prompt`. Registered children carry their parent session, collaboration, action, direction revision and task, and inherit the project working directory. Mutating collaboration calls identify their originating action and revision; expired work must not gain the authority of a later action. Child creation has a round-wide count limit and project concurrency limit. Parent completion is followed by child drainage before independent review. Pause and direction changes revoke old authority, request interruption and wait for observable quiescence; session records and artifacts remain available.
+
+Recovery uses the original session and action, with separate finite allowances for continuation and format-only restatement. Uncertain sends are not replayed. Real blocked replies terminate with a reason; transport and inspection failures remain observable. The controller schedules project ticks independently with bounded concurrency and backoff, so one unavailable project need not stop all others.
+
+### Budgets and metering
+
+Project defaults are stored with workbench control; each new collaboration round copies its approved limits. Updating defaults does not silently enlarge an active round. Duration and repair defaults remain finite, with optional tokens, USD, concurrency and total-child limits. Runtime dispatch and core observation enforce the applicable scope for managed actions and registered children; direct workbench sends also receive a scope. These checks do not replace provider-side billing limits or cancel unreported consumption already in flight.
+
+The backend's `native-session-delta` aggregate accounts for the current round across bound sessions and children. Missing tokens or cost remain unknown, and a configured limit that cannot be measured blocks further managed dispatch. UI session usage and run usage are distinct views, not totals to add together. Saving budget defaults does not resume an exhausted run.
+
 ## State and evidence
 
 - Delivery acknowledgement confirms receipt of a request.
@@ -60,11 +72,17 @@ Prior rounds and their artifacts remain available. Stage progress is based on th
 
 ## Local configuration and startup
 
-`npm run setup` prepares local configuration without overwriting existing files. `npm start` serves the workbench at port 8791; `npm run dev` uses the Vite development server. The agent runtime is a separate process started with `npm run runtime` after configuring `var/native-runtime.local.json`. Its default port is 8793. Use the [configuration examples](../examples) as the starting point and explicitly enable agents you have installed and authenticated.
+`npm run setup` creates missing local files without overwriting existing configuration or project registration. `npm run connect` interactively selects executable paths, existing agent homes/profiles and a runtime port, preserves unrelated configuration and shows changes before writing. It installs no agents and reads no credentials. `npm run doctor` checks settings, health and provider discovery with no model calls; it does not verify authentication or inference.
+
+`npm start` serves the workbench at port 8791, and `npm run dev` uses Vite. `npm start -- --with-runtime` can launch both services; it refuses to reuse a runtime reporting another configuration and leaves that runtime alone. The launcher cleans up a runtime it started, while an already running matching runtime remains independently owned. You may instead start `npm run runtime` separately; its default port is 8793. Advanced configuration is described by [examples](../examples).
 
 Node.js 24 is required for direct TypeScript execution and `node:sqlite`. Python 3 is needed by ARIS helpers. On Windows the dashboard/controller and native runtime run directly, while Bash-based ARIS helpers use WSL. An individual skill may need additional packages, tools, credentials or datasets. An offline dashboard run exercises the web application, not a model call.
 
 The top-bar **EN / 中文** selector, implemented in [i18n.tsx](../apps/dashboard/src/i18n.tsx), switches English and Chinese interface text. Project content, agent output, artifacts, and upstream skill text retain their original language. Core user documentation is available in both languages; MIT legal text and the complete upstream skill collection are not translated.
+
+### Source and deployment
+
+The source checkout used by the launcher is the canonical installation: startup rebuilds the UI from its current source unless `--no-build` was explicitly requested. Updating a separate checkout or copying a built UI does not update a running controller/runtime. Upgrade that installation as described in [README](../README.md#upgrade-from-source), restart its owned processes, and verify the served version and runtime connection. Keep local configuration, project roots and native session homes in place; do not publish them with source or replace them using another installation's state. No automatic updater or cross-installation state migration is provided.
 
 ### Windows background hosting
 
@@ -84,4 +102,4 @@ Local configuration, model credentials, research projects and native session rec
 
 ## Verification boundaries
 
-Representative real-agent runs exercised execution, review, questions, repair, direction synchronization and iteration through acceptance. Selected exceptional branches use isolated tests. [tests](../tests) includes runtime, collaboration, planning, workspace and export checks. These checks do not verify all ARIS skills, model endpoints, scientific claims or operating systems.
+v0.2.0 live model acceptance is **pending**. [tests](../tests) contains runtime, collaboration, recovery, budget, scheduler, UI, workspace and export software checks. An isolated test, provider listing or build success does not prove live execution or scientific acceptance. Previous representative runs do not establish validation of this version, all ARIS skills, model endpoints or operating systems.

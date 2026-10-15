@@ -1,3 +1,4 @@
+import { summarizeAttention } from '../attention';
 import { useI18n } from '../i18n';
 import { useRef, useState } from 'react';
 import type { Async } from '../hooks/useAsync';
@@ -38,22 +39,19 @@ export function ProjectAttention({ projectId, sessions, questions, onOpenSession
   const { t: tr, locale } = useI18n();
   const pending = state.data?.pending ?? [];
   const history = [...(state.data?.recent ?? [])].filter(item => !pending.some(detail => detail.session?.id === item.session.id && detail.approvals?.some(approval => approval.id === item.review.approvalId))).sort((a, b) => (b.review.updatedAt ?? 0) - (a.review.updatedAt ?? 0));
-  const count = pending.reduce((n, detail) => n + Math.max(1, detail.approvals?.length ?? 0), 0) + questions.length;
-  const humanCount = questions.length + pending.reduce((n, detail) => n + (detail.error ? 1 : (detail.approvals ?? []).filter(approval => {
-    if (approval.kind === 'question') return true;
-    const review = detail.approvalReviews?.find(item => item.approvalId === approval.id);
-    return review ? ['human_required', 'unknown'].includes(review.state) : !detail.approvalReviewStatus?.enabled || detail.session?.provider !== 'dsh-pi';
-  }).length), 0);
+  const {humanDetails,automaticDetails,humanCount,automaticCount}=summarizeAttention(pending,questions.length);
+  const count=humanCount+automaticCount;
   if (!state.data && state.loading) return <p className="wb-muted" role="status">{tr("正在读取实时待办…")}</p>;
-  if (!count && !history.length && !answeredQuestions.length && !state.error) return <p className="wb-muted">{tr("当前没有等待你回答或批准的请求，Agent 可以继续执行。")}</p>;
+  if (!count && !history.length && !answeredQuestions.length && !state.error) return <p className="wb-muted">{tr("当前没有等待你回答或批准的请求。执行进度请看概览。")}</p>;
   return <section className="wb-attention" aria-label={tr("需要你处理")}><div className="wb-section-heading"><h2>{humanCount ? tr("需要你处理 · {0}", { 0: humanCount }) : count ? tr("自动审核中 · {0}", { 0: count }) : tr("最近处理记录")}</h2><span className="wb-muted">{tr("操作权限 · Agent 提问 · 项目决定")}</span></div>
     {!count ? <p className="wb-muted">{tr("当前无需你批准或回答。下面保留最近处理结果。")}</p> : null}
     {state.error ? <p className="wb-error" role="alert">{tr("待办读取失败：")}{state.error.message}{tr("。当前列表可能不完整。")}</p> : null}
-    {pending.map(detail => detail.session ? <div key={detail.session.id} className="wb-attention-session"><div className="wb-section-heading"><strong>{detail.session.title}</strong><button type="button" className="wb-text-button" onClick={() => onOpenSession(detail.session!.id)}>{tr("打开来源对话 ↗")}</button></div><p className="wb-muted">{detail.session.provider}</p>
+    {humanDetails.map(detail => detail.session ? <div key={detail.session.id} className="wb-attention-session"><div className="wb-section-heading"><strong>{detail.session.title}</strong><button type="button" className="wb-text-button" onClick={() => onOpenSession(detail.session!.id)}>{tr("打开来源对话 ↗")}</button></div><p className="wb-muted">{detail.session.provider}</p>
       {detail.error ? <p className="wb-error">{tr("此会话正在等你处理，但具体请求读取失败：")}{detail.error}</p> : null}
       {detail.approvals?.map(approval => <ApprovalCard key={approval.id} projectId={projectId} sessionId={detail.session!.id} approval={approval} review={detail.approvalReviews?.find(review => review.approvalId === approval.id)} onHandled={onRefresh} />)}
       {!detail.error && !detail.approvals?.length ? <p className="wb-muted">{tr("会话状态已变化，正在刷新原请求。")}</p> : null}
     </div> : null)}
+    {automaticCount ? <details className="wb-automatic-requests"><summary>{tr('自动审核进行中 · {0}',{0:automaticCount})}</summary><p className="wb-muted">{tr('这些操作由审核链处理，当前无需你批准。')}</p>{automaticDetails.map(detail=><article key={detail.session?.id}><strong>{detail.session?.title}</strong>{detail.approvals.map(approval=><p key={approval.id}>{approval.title}</p>)}</article>)}</details> : null}
     {questions.map(item => <RecordedQuestion key={item.id} projectId={projectId} item={item} sessions={sessions} onOpenSession={onOpenSession} runId={runId} onHandled={onRefresh} />)}
     {answeredQuestions.length ? <details className="wb-decisions-history" open><summary>{tr("已回答 ·")} {answeredQuestions.length}</summary>{[...answeredQuestions].reverse().map(item=><article key={`${item.runId}:${item.questionId}`}><strong>{item.title}</strong><p>{item.answer}</p><small className="wb-muted">{new Date(item.at).toLocaleString(locale)} · {item.state==='acknowledged'?tr("执行者已确认"):tr("答复已送达，等待执行者落实")}{tr("；无需重复回答")}</small><button className="wb-text-button" type="button" onClick={()=>onOpenSession(item.sessionId)}>{tr("查看执行对话 ↗")}</button></article>)}</details> : null}
     {history.length ? <details className="wb-attention-history"><summary>{tr("最近处理记录 ·")} {history.length}</summary>{history.slice(0, 6).map(({session, review}) => <article key={`${session.id}:${review.approvalId}`}><strong>{['human_required', 'reviewing_dsh', 'reviewing_codex', 'allowing', 'unknown'].includes(review.state) ? tr("暂未发现可操作的原请求") : tr(reviewLabels[review.state] || review.state)} · {review.request?.title === 'Unsupported question' ? tr("旧版缺少题干的请求") : review.request?.title === 'DeepSeek Harness question' ? tr("DSH 提问") : review.request?.title || tr("操作请求")}</strong><p>{review.reason}</p>{review.request?.description ? <pre className="wb-request-detail">{review.request.description}</pre> : <p className="wb-muted">{tr("这条旧记录未保存具体内容，请查看来源对话。")}</p>}<button type="button" className="wb-text-button" onClick={() => onOpenSession(session.id)}>{tr("查看来源对话 ↗")}</button></article>)}</details> : null}

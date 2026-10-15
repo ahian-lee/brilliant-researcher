@@ -42,9 +42,19 @@ try {
   const workbenchFile = join(directory, 'var/workbench.local.json');
   writeFileSync(workbenchFile, JSON.stringify({ nativeUrl }));
   const dashboardPort = await port();
-  const dashboard = start('scripts/start.mjs', [], {
+  writeFileSync(runtimeFile+'.different',JSON.stringify(config));
+  const ownerMismatch = start('scripts/start.mjs', ['--no-build','--with-runtime'], {
+    BRI_PORT:String(dashboardPort),BRI_DB:join(directory,'unused.db'),BRI_NATIVE_CONFIG:runtimeFile+'.different',
+    BRI_ARIS_PROJECTS:join(directory,'var/aris-projects.local.json'),BRI_WORKBENCH_CONFIG:workbenchFile,
+  });
+  // A different configuration cannot silently take ownership of the existing service.
+  const mismatchExit=await Promise.race([once(ownerMismatch,'exit'),new Promise(resolve=>setTimeout(()=>resolve(null),15000))]);
+  assert.ok(mismatchExit,'mismatched runtime start exits');assert.notEqual(ownerMismatch.exitCode,0);
+  assert.equal((await fetch(nativeUrl+'/health')).status,200,'existing runtime remains alive after a refused reuse');
+  const dashboard = start('scripts/start.mjs', ['--no-build','--with-runtime'], {
     BRI_PORT: String(dashboardPort), BRI_DB: join(directory, 'state.db'),
     BRI_ARIS_PROJECTS: join(directory, 'var/aris-projects.local.json'), BRI_WORKBENCH_CONFIG: workbenchFile,
+    BRI_NATIVE_CONFIG:runtimeFile,
     // The public entry must override this unsafe caller environment.
     BRI_DISABLE_REMOTE: '0',
   });

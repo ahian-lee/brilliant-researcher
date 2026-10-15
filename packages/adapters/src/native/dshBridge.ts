@@ -46,7 +46,9 @@ export class DshBridge {
       {insert:[...(options.mcpServers??[]).map(server=>({id:`bri-mcp-${server.serverName}`,name:'@deepseek-ai/dsh-mcp-client',config:server})),{id:'bri-native-dsh-bridge',name:bridgePath,config:{profile:options.profile}}]},
     ]),{mode:0o600});
     const args=[...(options.cliEntry?['--expose-internals',options.cliEntry]:[]),'--profile',options.profile,'--patch',patchPath];
-    const child=spawn(options.executable,args,{env:{...process.env,DSH_HOME:options.home},stdio:['pipe','pipe','pipe'],windowsHide:true});
+    // Windows processes started through WSL can lack PATHEXT. PowerShell then
+    // silently fails to execute even an explicit node.exe path.
+    const child=spawn(options.executable,args,{env:{...process.env,...(process.platform==='win32'&&!process.env.PATHEXT?{PATHEXT:'.COM;.EXE;.BAT;.CMD'}:{}),DSH_HOME:options.home},stdio:['pipe','pipe','pipe'],windowsHide:true});
     const client=new DshBridge(child,directory);
     try{
       await new Promise<void>((resolve,reject)=>{

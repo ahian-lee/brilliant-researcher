@@ -429,7 +429,7 @@ export class ArisReader {
     focus.sessions = sessionSnapshot.sessions;
     focus.session_note = sessionSnapshot.source.message;
     return {
-      project: this.project(projectId),
+      project: this.project(projectId, runs, focus),
       tasks,
       host: null,
       inbox: [],
@@ -654,11 +654,23 @@ export class ArisReader {
     return Array.isArray(control?.recordedDecisions) ? control.recordedDecisions : [];
   }
 
-  private project(projectId: string): ArisReaderProject {
+  private managedActiveCount(registration: ArisProjectRegistration): number | undefined {
+    const store = asRecord(this.safeJson(registration, '.bri/collaboration.json'));
+    if (store.version !== 1 || !Array.isArray(store.runs)) return undefined;
+    // The collaboration store is append ordered, just as CollaborationLoop.status().
+    // Native phase records remain historical evidence, not live process counts.
+    const current = asRecord(store.runs.at(-1));
+    if (!textOrNull(current.id)) return undefined;
+    if (current.state === 'accepted' && current.acceptanceRecordPending === true) return 1;
+    if (['paused', 'budget_exhausted', 'needs_attention', 'accepted', 'audited'].includes(String(current.state))) return 0;
+    if (['ready', 'planning', 'executing', 'reviewing', 'stopping', 'synchronizing'].includes(String(current.state))) return 1;
+    return undefined;
+  }
+
+  private project(projectId: string, runs: InternalRun[] = this.readRuns(projectId), preparedFocus?: ReturnType<typeof buildResearchFocus>): ArisReaderProject {
     const registration = this.registration(projectId);
-    const runs = this.readRuns(projectId);
     const phases = runs.flatMap((run) => run.phases);
-    const focus = buildResearchFocus(runs, this.safeJson(registration, '.aris/progress.json'), registration, Date.now(), this.recordedDecisions(registration));
+    const focus = preparedFocus ?? buildResearchFocus(runs, this.safeJson(registration, '.aris/progress.json'), registration, Date.now(), this.recordedDecisions(registration));
     const latest = runs.map((run) => run.updated ?? run.created).filter((value): value is string => Boolean(value)).sort().at(-1) ?? '';
     return {
       id: registration.id,
@@ -669,7 +681,7 @@ export class ArisReader {
       supervisor: registration.supervisor ?? 'Pi / ARIS',
       updated_at: latest,
       task_count: phases.length,
-      active_count: phases.filter((phase) => phase.status === 'running' && Boolean(phase.updated)
+      active_count: this.managedActiveCount(registration) ?? phases.filter((phase) => phase.status === 'running' && Boolean(phase.updated)
         && Date.now() - Date.parse(phase.updated!) < 15 * 60_000).length,
       // These Idea helper steps produce artifacts; their workflow owns the
       // review. Do not invent a separate review requirement for each helper.
@@ -694,10 +706,28 @@ export class ArisReader {
     } catch {
       return [];
     }
-    return names.map((name) => this.readRun(registration, name.slice(0, -5))).filter((run): run is InternalRun => Boolean(run));
+    if (!names.length) return [];
+    // One synchronous projection reads shared reports once. Nothing survives
+    // this call, so the next poll observes changed files and human questions.
+    const texts = new Map<string, string | null>();
+    const readText = (child: string): string | null => {
+      const key = filesystemPathFromLocator(child);
+      if (!texts.has(key)) texts.set(key, this.safeText(registration, child));
+      return texts.get(key)!;
+    };
+    const reviewState = asRecord(this.safeJson(registration, 'review-stage/REVIEW_STATE.json'));
+    const reportArtifacts = this.discoverArtifacts(registration, true).flatMap(({ path, kind }) => {
+      const content = readText(path);
+      return content === null ? [] : [{ path, content, kind, readable: true } satisfies ArisArtifact];
+    });
+    return names.map((name) => this.readRun(registration, name.slice(0, -5), { readText, reviewState, reportArtifacts })).filter((run): run is InternalRun => Boolean(run));
   }
 
-  private readRun(registration: ArisProjectRegistration, runId: string): InternalRun | null {
+  private readRun(registration: ArisProjectRegistration, runId: string, shared: {
+    readText: (child: string) => string | null;
+    reviewState: Record<string, unknown>;
+    reportArtifacts: ArisArtifact[];
+  }): InternalRun | null {
     const statePath = this.safePath(registration, `.aris/runs/${runId}.json`);
     if (!statePath) return null;
     let state: Record<string, unknown> = {};
@@ -716,7 +746,7 @@ export class ArisReader {
       const value = asRecord(raw);
       const artifact = textOrNull(value.artifact);
       const artifactPath = artifact ? normalizeArtifactPath(artifact) : null;
-      const artifactContent = artifactPath ? this.safeText(registration, artifactPath) : null;
+      const artifactContent = artifactPath ? shared.readText(artifactPath) : null;
       return {
         phase: textOrNull(value.phase) ?? 'unknown',
         status: phaseStatus(value.status),
@@ -731,12 +761,9 @@ export class ArisReader {
         updated: textOrNull(value.updated),
       } satisfies ArisPhase;
     });
-    const projectReviewState = asRecord(this.safeJson(registration, 'review-stage/REVIEW_STATE.json'));
+    const projectReviewState = shared.reviewState;
     const reviewMatches = !projectReviewState.run_id || projectReviewState.run_id === runId;
-    const reportArtifacts = this.discoverArtifacts(registration, reviewMatches).flatMap(({ path, kind }) => {
-      const content = this.safeText(registration, path);
-      return content === null ? [] : [{ path, content, kind, readable: true } satisfies ArisArtifact];
-    });
+    const reportArtifacts = reviewMatches ? shared.reportArtifacts : shared.reportArtifacts.filter(artifact => !artifact.path.startsWith('review-stage/'));
     const phaseArtifacts = phases.flatMap((phase) =>
       phase.artifact_path
         ? [{ path: phase.artifact_path, content: phase.artifact_content, kind: 'phase' as const, readable: phase.artifact_content !== null }]
@@ -758,7 +785,7 @@ export class ArisReader {
       phases,
       artifacts,
       review_state: reviewState,
-      review_log: reviewMatches ? this.safeText(registration, 'review-stage/AUTO_REVIEW.md') : null,
+      review_log: reviewMatches ? shared.readText('review-stage/AUTO_REVIEW.md') : null,
       journal_run_id: textOrNull(projectReviewState.run_id),
       state_error: stateError,
     };

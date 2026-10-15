@@ -12,6 +12,8 @@ import type {
   WorkbenchSession,
   WorkbenchReview,
   WorkbenchCollaborationRun,
+  WorkbenchBudget,
+  WorkbenchBudgetPatch,
 } from './workbenchTypes';
 
 const BASE = '/api/workbench';
@@ -179,3 +181,6 @@ export const setWorkbenchAccess = (projectId: string, payload: {accessMode:'full
 
 export const answerRecordedQuestion = (projectId:string, payload:{questionId:string;runId:string|null;sessionId:string;answer:string}):Promise<{accepted:boolean;error?:string}> => post(`/projects/${encodeURIComponent(projectId)}/decisions`,payload);
 export const fetchAttentionCounts = ():Promise<{projects:Record<string,{human:number;automatic:number;error?:string}>}> => request('/attention-counts');
+
+export const setWorkbenchBudget = (projectId: string, budget: WorkbenchBudgetPatch): Promise<{budget: WorkbenchBudget}> =>
+  post(`/projects/${encodeURIComponent(projectId)}/budget`, {budget});

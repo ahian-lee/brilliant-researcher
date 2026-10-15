@@ -33,6 +33,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const python = spawnSync(process.platform === 'win32' ? 'wsl.exe' : 'python3', process.platform === 'win32' ? ['--exec', 'python3', '--version'] : ['--version'], { encoding: 'utf8', timeout: 10000, windowsHide: true });
   console.log(python.status === 0 ? `ARIS helper prerequisite: ${(python.stdout || python.stderr).trim()}` : 'ARIS helper prerequisite missing: install Python 3; on Windows, install WSL with python3. The Dashboard can still start.');
   console.log('Next: npm start (local Dashboard; no model process or remote SSH).');
-  console.log('For agent execution, install/authenticate DSH and/or Codex separately. Fill var/native-runtime.local.json with your own executable, home, DSH profile and optional cliEntry, set enabled:true, then run npm run runtime in another terminal.');
+  console.log('For agent execution, install/authenticate DSH and/or Codex separately, then run npm run connect and npm run doctor. Start both services with npm start -- --with-runtime; existing profiles and credentials remain in your agent installation.');
   console.log('Windows ARIS helpers require WSL + Python 3. Use absolute paths readable by the host running each command. No credentials, agent profiles, integrations or scheduled tasks were installed.');
 }

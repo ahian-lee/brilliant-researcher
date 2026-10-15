@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ArisReader, loadArisProjectRegistrations } from '../packages/adapters/src/arisReader.ts';
@@ -165,6 +167,81 @@ assert.equal(finished.project.pending_review_count, 0);
 assert.equal(finished.tasks.find(t => t.phase === 'research-lit')?.verdict, 'pending');
 assert.equal(finished.tasks.find(t => t.phase === 'research-lit')?.run_status, 'completed');
 assert.equal(pipelineReader.runDetail('aris-pipeline', 'idea-child')?.run.status, 'completed');
+
+// A stopped managed run must not look active for another 15 minutes because
+// its native phases retain their last running state. Reading never rewrites it.
+const managedRoot = join(scratch, 'managed-activity');
+mkdirSync(join(managedRoot, '.aris', 'runs'), { recursive: true });
+mkdirSync(join(managedRoot, '.bri'));
+const nativePaths = ['old-one', 'old-two', 'current'].map(id => join(managedRoot, '.aris', 'runs', `${id}.json`));
+for (const path of nativePaths) writeFileSync(path, JSON.stringify({
+  run_id: path.split(/[\\/]/).at(-1)!.replace('.json', ''),
+  phases: [{ phase: 'implementation', status: 'running', updated: new Date().toISOString() }],
+}));
+const nativeBefore = nativePaths.map(path => readFileSync(path, 'utf8'));
+const managedReader = new ArisReader([{ id: 'managed', root: managedRoot }]);
+assert.equal(managedReader.listProjects()[0].active_count, 3, 'legacy projects keep their recent native phase activity');
+const collaborationPath = join(managedRoot, '.bri', 'collaboration.json');
+const writeCollaboration = (state: string, extra = {}) => writeFileSync(collaborationPath, JSON.stringify({
+  version: 1,
+  runs: [{ id: 'old-collaboration', state: 'executing' }, { id: 'current-collaboration', state, ...extra }],
+}));
+for (const state of ['paused', 'budget_exhausted', 'needs_attention', 'accepted', 'audited']) {
+  writeCollaboration(state);
+  assert.equal(managedReader.listProjects()[0].active_count, 0, `${state} cannot inherit native running activity`);
+  const stoppedOverview = managedReader.overview('managed');
+  assert.equal(stoppedOverview.project.active_count, 0, 'overview and sidebar share the same projection');
+  assert.equal(stoppedOverview.tasks.filter(task => task.phase_status === 'running').length, 3, 'native evidence stays visible');
+}
+for (const state of ['ready', 'planning', 'executing', 'reviewing', 'stopping', 'synchronizing']) {
+  writeCollaboration(state);
+  assert.equal(managedReader.listProjects()[0].active_count, 1, `${state} counts only the current collaboration, not old phases or rounds`);
+}
+writeCollaboration('accepted', { acceptanceRecordPending: true });
+assert.equal(managedReader.listProjects()[0].active_count, 1, 'pending acceptance publication is still reviewing');
+writeFileSync(collaborationPath, '{incomplete');
+assert.equal(managedReader.listProjects()[0].active_count, 3, 'unreadable control data does not overwrite legacy interpretation');
+assert.deepEqual(nativePaths.map(path => readFileSync(path, 'utf8')), nativeBefore, 'activity projection never changes native ARIS files');
+console.log('ARIS managed activity projection tests passed');
+
+// Many rounds share reports. Count actual file reads and confirm the next call
+// observes edits/questions rather than keeping a cache across requests.
+const manyRoot = join(scratch, 'many-rounds');
+mkdirSync(join(manyRoot, '.aris', 'runs'), { recursive: true });
+mkdirSync(join(manyRoot, 'outputs'));
+const reportPath = join(manyRoot, 'outputs', 'shared.md');
+writeFileSync(reportPath, 'Original shared report');
+for (let i = 0; i < 12; i++) writeFileSync(join(manyRoot, '.aris', 'runs', `round-${i}.json`), JSON.stringify({
+  run_id: `round-${i}`, phases: [{ phase: 'summary', status: 'done', artifact: 'outputs/shared.md' }],
+}));
+const manyReader = new ArisReader([{ id: 'many', root: manyRoot }]);
+const originalRead = fs.readFileSync;
+let reportReads = 0, runReads = 0;
+let manyOverview: ReturnType<ArisReader['overview']>;
+try {
+  fs.readFileSync = ((path, ...args) => {
+    if (String(path) === reportPath) reportReads++;
+    if (String(path).startsWith(join(manyRoot, '.aris', 'runs'))) runReads++;
+    return originalRead(path, ...args);
+  }) as typeof fs.readFileSync;
+  syncBuiltinESMExports();
+  manyOverview = manyReader.overview('many');
+} finally {
+  fs.readFileSync = originalRead;
+  syncBuiltinESMExports();
+}
+assert.equal(reportReads, 1, 'one overview reads a shared report once across all rounds and phase locators');
+assert.equal(runReads, 12, 'overview does not reread run files for its project projection');
+assert.equal(manyOverview!.tasks.length, 12);
+assert.ok(manyOverview!.tasks.every(task => task.artifacts.some(artifact => artifact.content === 'Original shared report')));
+writeFileSync(reportPath, 'Updated shared report');
+writeFileSync(join(manyRoot, '.aris', 'progress.json'), JSON.stringify({ questions: [{ id: 'resource', title: 'Real resource decision' }] }));
+const changedOverview = manyReader.overview('many');
+assert.equal(changedOverview.project.human_question_count, 1, 'new questions appear on the next request');
+assert.ok(changedOverview.tasks.every(task => task.artifacts.some(artifact => artifact.content === 'Updated shared report')));
+assert.equal(manyReader.listProjects()[0].human_question_count, 1);
+console.log(`ARIS shared report read regression passed: ${reportReads} report read, ${runReads} run reads for 12 rounds; fresh reports/questions on next request`);
+
 
 
 // A shared project journal without per-line run ids is retained as an

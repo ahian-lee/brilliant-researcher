@@ -5,16 +5,18 @@ import type { RuntimeModel } from '../../../core/src/researchWorkbench.ts';
 
 type Pending = { resolve:(value:any)=>void; reject:(error:Error)=>void; timer:ReturnType<typeof setTimeout> };
 type ServerRequest = { id:string|number; method:string; params:any; decisions?:Map<string,unknown> };
-type State = { record:NativeRecord; snapshot:NativeSnapshot; requests:Map<string,ServerRequest>; opened:boolean; opening?:Promise<void>; activeTurnId?:string };
+type State = { record:NativeRecord; snapshot:NativeSnapshot; requests:Map<string,ServerRequest>; opened:boolean; opening?:Promise<void>; activeTurnId?:string;version:number;emptyEvidence?:boolean;startedHere?:string;recovering?:Promise<void> };
+const advance=(previous:string|undefined,next:string)=>!previous||next>previous?next:previous;
 const now = () => new Date().toISOString();
 const input = (text:string) => [{type:'text',text,text_elements:[]}];
 const errorText = (error:unknown) => error instanceof Error ? error.message : String(error);
 const iso = (value:any) => typeof value === 'number' ? new Date(value * 1000).toISOString() : undefined;
 const askUserTool={type:'function',name:'bri_ask_user',description:'Ask the human one or more questions and wait for their answer. Available in Default mode as well as Plan mode.',inputSchema:{type:'object',properties:{questions:{type:'array',items:{type:'object',properties:{id:{type:'string'},header:{type:'string'},question:{type:'string'},options:{type:'array',items:{type:'object',properties:{label:{type:'string'},description:{type:'string'}},required:['label'],additionalProperties:false}}},required:['id','question'],additionalProperties:false}}},required:['questions'],additionalProperties:false}};
 
+export interface CodexOptions {executable:string;cliEntry?:string;home?:string;onUpdate:NativeUpdate;collaborationTools?:any[];onCollaborationTool?:(record:NativeRecord,name:string,args:any)=>Promise<unknown>;mcpServers?:(record:NativeRecord)=>Record<string,unknown>}
 /** Direct, persistent Codex app-server JSONL transport. No daemon or SDK dependency. */
 export class NativeCodexDriver implements NativeDriver {
-  private options:{executable:string;home?:string;onUpdate:NativeUpdate};
+  private options:CodexOptions;
   private child?:ChildProcessWithoutNullStreams;
   private ready?:Promise<void>;
   private sequence = 0;
@@ -23,7 +25,7 @@ export class NativeCodexDriver implements NativeDriver {
   private byThread = new Map<string,State>();
   private closing = false;
 
-  constructor(options:{executable:string;home?:string;onUpdate:NativeUpdate}) { this.options=options; }
+  constructor(options:CodexOptions) { this.options=options; }
 
   private write(message:unknown) {
     if (!this.child || this.child.killed || !this.child.stdin.writable) throw new Error('Codex app-server is not connected');
@@ -41,8 +43,8 @@ export class NativeCodexDriver implements NativeDriver {
     if (this.closing) return Promise.reject(new Error('Codex driver is closed'));
     if (this.ready) return this.ready;
     this.ready=(async()=>{
-      const child=spawn(this.options.executable,['app-server','--stdio'],{
-        env:{...process.env,...(this.options.home ? {CODEX_HOME:this.options.home} : {})},
+      const child=spawn(this.options.executable,[...(this.options.cliEntry?[this.options.cliEntry]:[]),'app-server','--stdio'],{
+        env:{...process.env,...(process.platform==='win32'&&!process.env.PATHEXT?{PATHEXT:'.COM;.EXE;.BAT;.CMD'}:{}),...(this.options.home ? {CODEX_HOME:this.options.home} : {})},
         stdio:['pipe','pipe','pipe'],windowsHide:true,
       });
       this.child=child;
@@ -69,10 +71,10 @@ export class NativeCodexDriver implements NativeDriver {
     })();
     return this.ready;
   }
-  private state(record:NativeRecord):State {
+  private state(record:NativeRecord,previous?:NativeSnapshot):State {
     let state=this.states.get(record.id);
     if (!state) {
-      state={record,snapshot:{session:record,messages:[],activity:[],approvals:[]},requests:new Map(),opened:false};
+      state={record,snapshot:previous?{...previous,session:record,messages:[...previous.messages],activity:[...previous.activity],approvals:[...previous.approvals]}:{session:record,messages:[],activity:[],approvals:[]},requests:new Map(),opened:false,version:0,emptyEvidence:!!previous&&!previous.messages.length&&!previous.activity.length&&!previous.approvals.length&&!previous.activeTurn&&!previous.hasOlderMessages};
       this.states.set(record.id,state);
       if(record.nativeId) this.byThread.set(record.nativeId,state);
     }
@@ -91,7 +93,7 @@ export class NativeCodexDriver implements NativeDriver {
   }
   private settings(record:NativeRecord) {
     return {cwd:record.cwd,model:record.configuredModel??record.model??undefined,...this.policy(record),
-      config:{model_reasoning_effort:record.configuredThinkingOptionId??record.thinkingOptionId??'high'}};
+      config:{model_reasoning_effort:record.configuredThinkingOptionId??record.thinkingOptionId??'high',...(this.options.mcpServers?Object.fromEntries(Object.entries(this.options.mcpServers(record)).map(([name,value])=>['mcp_servers.'+name,value])):{})}};
   }
   private hydrate(state:State,thread:any,response?:any) {
     state.record.nativeId=thread.id;this.byThread.set(thread.id,state);
@@ -102,7 +104,7 @@ export class NativeCodexDriver implements NativeDriver {
     state.record.status=this.status(thread.status);
     state.activeTurnId=undefined;delete state.snapshot.activeTurn;
     for (const turn of thread.turns??[]) {
-      for(const item of turn.items??[]) this.item(state,item,turn.status!=='inProgress',iso(turn.startedAt));
+      for(const item of turn.items??[]) this.item(state,item,turn.status!=='inProgress',iso(turn.startedAt),true);
       if(turn.status==='inProgress') {state.activeTurnId=turn.id;state.snapshot.activeTurn=turn;}
     }
     if(state.activeTurnId) state.record.status='running';
@@ -111,14 +113,34 @@ export class NativeCodexDriver implements NativeDriver {
     if(status?.type==='active') return status.activeFlags?.length ? 'waiting_input' : 'running';
     return status?.type==='systemError'?'error':'idle';
   }
-  private async ensure(record:NativeRecord):Promise<State> {
-    await this.connect();const state=this.state(record);
+  private startParams(record:NativeRecord){return {...this.settings(record),historyMode:'legacy',dynamicTools:[askUserTool,...(this.options.collaborationTools??[])],developerInstructions:'When you need a human answer, use bri_ask_user. It works in Default mode, where request_user_input may be unavailable.'};}
+  private empty(record:NativeRecord,snapshot:NativeSnapshot){
+    const usage=record.usage;
+    return usage?.source==='native-empty-session'&&usage.complete===true&&usage.inputTokens===0&&usage.outputTokens===0&&usage.totalTokens===0&&usage.costUsd===0&&!record.native?.lastPromptAt&&!record.lastMessageAt&&!record.lastActivityAt&&!snapshot.messages.length&&!snapshot.activity.length&&!snapshot.approvals.length&&!snapshot.activeTurn&&!snapshot.hasOlderMessages;
+  }
+  private noRollout(error:unknown){return /no rollout found/i.test(errorText(error));}
+  private async recoverEmpty(state:State,failedId:string):Promise<void>{
+    if((state.record.nativeId??state.record.native?.threadId)!==failedId)return;
+    if(state.recovering)return state.recovering;
+    if(!state.emptyEvidence||!this.empty(state.record,state.snapshot)||state.activeTurnId||state.requests.size)throw Error('Codex no rollout found; existing or unverified history cannot be replaced');
+    state.recovering=(async()=>{
+      const response=await this.request('thread/start',this.startParams(state.record));
+      if(typeof response.thread?.id!=='string'||!response.thread.id||response.thread.id===failedId)throw Error('Codex empty-session recovery did not return a new thread');
+      const at=now();state.record.native={...state.record.native,briAskUserRegistered:true,path:undefined,emptyThreadRecoveries:[...(state.record.native?.emptyThreadRecoveries??[]),{nativeId:failedId,replacementNativeId:response.thread.id,at,reason:'no rollout found before first prompt'}]};
+      this.byThread.delete(failedId);this.hydrate(state,response.thread,response);state.startedHere=response.thread.id;state.opened=true;delete state.record.error;this.publish(state);
+    })().finally(()=>{state.recovering=undefined;});
+    return state.recovering;
+  }
+  private async ensure(record:NativeRecord,previous?:NativeSnapshot):Promise<State> {
+    await this.connect();const state=this.state(record,previous);
+    if(state.recovering)await state.recovering;
     if(!state.opened) {
       if(!state.opening) state.opening=(async()=>{
         const id=state.record.nativeId??state.record.native?.threadId;
-        // Some released servers advertise pagination but reject list_turns at runtime.
-        const response=await this.request(id?'thread/resume':'thread/start',id?{threadId:id,...this.settings(state.record)}:{...this.settings(state.record),historyMode:'legacy',dynamicTools:[askUserTool],developerInstructions:'When you need a human answer, use bri_ask_user. It works in Default mode, where request_user_input may be unavailable.'});
-        if(!id) state.record.native={...state.record.native,briAskUserRegistered:true};
+        let response:any;
+        try{response=await this.request(id?'thread/resume':'thread/start',id?{threadId:id,...this.settings(state.record)}:this.startParams(state.record));}
+        catch(error){if(!id||!this.noRollout(error)||!state.emptyEvidence||!this.empty(state.record,state.snapshot))throw error;await this.recoverEmpty(state,id);return;}
+        if(!id){state.record.native={...state.record.native,briAskUserRegistered:true};state.startedHere=response.thread.id;state.emptyEvidence=!(response.thread.turns??[]).length;}
         this.hydrate(state,response.thread,response);state.opened=true;delete state.record.error;
         // Publish immediately: callers must persist the UUID even before the first message.
         this.publish(state);
@@ -139,17 +161,21 @@ export class NativeCodexDriver implements NativeDriver {
     } while(cursor);
     return models;
   }
-  async open(record:NativeRecord):Promise<NativeSnapshot> {await this.ensure(record);return this.inspect(record);}
-  async inspect(record:NativeRecord):Promise<NativeSnapshot> {
-    const state=await this.ensure(record);
-    let response:any;
+  async open(record:NativeRecord,previous?:NativeSnapshot):Promise<NativeSnapshot> {await this.ensure(record,previous);return this.inspect(record,previous);}
+  async inspect(record:NativeRecord,previous?:NativeSnapshot):Promise<NativeSnapshot> {
+    const state=await this.ensure(record,previous);
+    let response:any;const version=state.version,readId=state.record.nativeId!;
     try {response=await this.request('thread/read',{threadId:state.record.nativeId,includeTurns:true});}
     catch(error) {
       // A just-started durable thread has no rollout until its first input.
       if(/not materialized yet; includeTurns is unavailable before first user message/.test(errorText(error))) {this.publish(state);return state.snapshot;}
+      if(this.noRollout(error)&&state.record.nativeId!==readId)return state.snapshot;
+      if(this.noRollout(error)&&state.startedHere===readId&&!state.record.native?.lastPromptAt&&!state.snapshot.messages.length&&!state.snapshot.activity.length&&!state.snapshot.activeTurn){this.publish(state);return state.snapshot;}
+      if(this.noRollout(error)&&state.emptyEvidence&&this.empty(state.record,state.snapshot)){await this.recoverEmpty(state,readId);Object.assign(record,state.record);return state.snapshot;}
       throw error;
     }
-    this.hydrate(state,response.thread);
+    if(state.version!==version)return state.snapshot;
+    const turns=[...(response.thread.turns??[])];
     // Paginated threads intentionally omit full-history hydration from thread/read.
     let hasOlderMessages=false;
     if(response.thread.historyMode==='paginated'&&!(response.thread.turns??[]).length) {
@@ -158,18 +184,20 @@ export class NativeCodexDriver implements NativeDriver {
         let page:any;
         try {page=await this.request('thread/turns/list',{threadId:state.record.nativeId,itemsView:'full',sortDirection:'asc',limit:100,cursor});}
         catch(error) {if(!/list_turns is not supported|method not found/i.test(errorText(error))) throw error;hasOlderMessages=!!response.thread.preview;break;}
-        for(const turn of page.data??[]) {
-          for(const item of turn.items??[]) this.item(state,item,turn.status!=='inProgress',iso(turn.startedAt));
-          if(turn.status==='inProgress') {state.activeTurnId=turn.id;state.snapshot.activeTurn=turn;}
-        }
+        if(state.version!==version)return state.snapshot;
+        turns.push(...(page.data??[]));
         cursor=page.nextCursor??undefined;
       } while(cursor);
     }
+    this.hydrate(state,{...response.thread,turns});
     state.snapshot.hasOlderMessages=hasOlderMessages;this.publish(state);return state.snapshot;
   }
-  async send(record:NativeRecord,message:string) {
+  async send(record:NativeRecord,message:string,assertDispatch?:()=>void) {
     if(!message.trim()) throw new Error('Message is required');
     const state=await this.ensure(record),threadId=state.record.nativeId;
+    // ensure may reconnect asynchronously; authorization must still hold at the write.
+    assertDispatch?.();
+    state.record.native={...state.record.native,lastPromptAt:now()};
     if(state.activeTurnId) {
       await this.request('turn/steer',{threadId,expectedTurnId:state.activeTurnId,input:input(message)});
     } else {
@@ -188,7 +216,7 @@ export class NativeCodexDriver implements NativeDriver {
   async interrupt(record:NativeRecord) {
     const state=await this.ensure(record);
     if(state.activeTurnId) await this.request('turn/interrupt',{threadId:state.record.nativeId,turnId:state.activeTurnId});
-    return {ok:true};
+    return {ok:true,confirmed:!state.activeTurnId,status:state.record.status};
   }
   async configure(record:NativeRecord,settings:{model?:string|null;thinkingOptionId?:string|null;permissionPreset?:'auto'|'danger-full-access';modeId?:'auto'|'full-access'}) {
     const state=await this.ensure(record);
@@ -225,21 +253,21 @@ export class NativeCodexDriver implements NativeDriver {
     }
     this.write({id:request.id,result:request.method==='item/tool/call'?{success:!cancel,contentItems:[{type:'inputText',text:JSON.stringify(cancel?{cancelled:true}:{answers:result})}]}:{answers:result}});state.requests.delete(id);state.record.status=state.activeTurnId?'running':'idle';this.publish(state);return {ok:true};
   }
-  private item(state:State,item:any,completed:boolean,at?:string) {
+  private item(state:State,item:any,completed:boolean,at?:string,historical=false) {
     if(!item?.id) return;
     if(item.type==='agentMessage'||item.type==='userMessage') {
       const text=item.type==='agentMessage'?item.text:(item.content??[]).map((part:any)=>part.text??(part.path?`[${part.type}: ${part.path}]`:'')).join('\n');
       const message={id:item.id,role:item.type==='agentMessage'?'assistant':'user',text:text??'',at,final:completed&&item.phase!=='commentary'};
       const existing=state.snapshot.messages.findIndex(value=>value.id===item.id);
-      if(existing<0) state.snapshot.messages.push(message);else state.snapshot.messages[existing]={...state.snapshot.messages[existing],...message};
-      state.record.lastMessageAt=at??now();return;
+      if(existing<0)state.snapshot.messages.push(message);else{const prior=state.snapshot.messages[existing];if(historical&&prior.text.startsWith(message.text)&&prior.text.length>message.text.length)message.text=prior.text;if(prior.final)message.final=true;state.snapshot.messages[existing]={...prior,...message};}
+      if(at||!historical)state.record.lastMessageAt=advance(state.record.lastMessageAt,at??now());return;
     }
     const summary=item.command??item.text??(item.type==='reasoning'?(item.summary??[]).join('\n'):item.tool??item.type);
     const activity={id:item.id,tool:item.type==='mcpToolCall'?`${item.server}/${item.tool}`:item.type,summary,status:item.status??(completed?'completed':'running'),
       target:item.cwd??item.path,description:item.aggregatedOutput??(item.changes?JSON.stringify(item.changes):undefined),error:item.error?JSON.stringify(item.error):undefined,at};
     const existing=state.snapshot.activity.findIndex(value=>value.id===item.id);
-    if(existing<0) state.snapshot.activity.push(activity);else state.snapshot.activity[existing]={...state.snapshot.activity[existing],...activity};
-    state.record.lastActivityAt=at??now();
+    if(existing<0)state.snapshot.activity.push(activity);else{const prior=state.snapshot.activity[existing];if(historical&&prior.description?.startsWith(activity.description??'')&&prior.description.length>(activity.description?.length??0))activity.description=prior.description;state.snapshot.activity[existing]={...prior,...activity};}
+    if(at||!historical)state.record.lastActivityAt=advance(state.record.lastActivityAt,at??now());
   }
   private receive(message:any) {
     // IDs from server requests occupy a separate namespace from client request IDs.
@@ -250,8 +278,13 @@ export class NativeCodexDriver implements NativeDriver {
     }
     const p=message.params??{},state=this.byThread.get(p.threadId??p.thread?.id);
     if(message.id!==undefined) {
+      if(state)state.version++;
       if(message.method==='currentTime/read') {this.write({id:message.id,result:{currentTimeAt:Math.floor(Date.now()/1000)}});return;}
       if(!state) {this.write({id:message.id,error:{code:-32601,message:'Unsupported native client request'}});return;}
+      if(message.method==='item/tool/call'&&this.options.collaborationTools?.some(tool=>tool.name===p.tool)&&this.options.onCollaborationTool){
+        let args=p.arguments;try{if(typeof args==='string')args=JSON.parse(args);}catch{args=null;}
+        void Promise.resolve().then(()=>this.options.onCollaborationTool!(state.record,p.tool,args??{})).then(result=>this.write({id:message.id,result:{success:true,contentItems:[{type:'inputText',text:JSON.stringify(result)}]}}),error=>this.write({id:message.id,result:{success:false,contentItems:[{type:'inputText',text:errorText(error)}]}})).catch(()=>{});return;
+      }
       if(message.method==='item/tool/call'&&p.tool==='bri_ask_user') {
         let args:any=p.arguments;
         try {if(typeof args==='string')args=JSON.parse(args);} catch {args=null;}
@@ -271,6 +304,7 @@ export class NativeCodexDriver implements NativeDriver {
       return;
     }
     if(!state) return;
+    state.version++;
     switch(message.method) {
       case 'thread/status/changed': state.record.status=this.status(p.status);break;
       case 'turn/started': state.activeTurnId=p.turn.id;state.snapshot.activeTurn=p.turn;state.record.status='running';break;
@@ -286,7 +320,10 @@ export class NativeCodexDriver implements NativeDriver {
         item.text+=p.delta;state.record.lastMessageAt=now();break;
       }
       case 'item/commandExecution/outputDelta': {
-        const item=state.snapshot.activity.find(value=>value.id===p.itemId);if(item)item.description=(item.description??'')+p.delta;break;
+        let item=state.snapshot.activity.find(value=>value.id===p.itemId);if(!item){item={id:p.itemId,tool:'commandExecution',summary:'command output',status:'running'};state.snapshot.activity.push(item);}item.description=(item.description??'')+p.delta;state.record.lastActivityAt=advance(state.record.lastActivityAt,now());break;
+      }
+      case 'thread/tokenUsage/updated': {
+        const usage=p.tokenUsage?.total;if(usage){const prior=state.record.usage??{},value=(key:string)=>typeof usage[key]==='number'&&Number.isFinite(usage[key])&&usage[key]>=0?Math.max(prior[key as keyof typeof prior] as number||0,usage[key]):prior[key as keyof typeof prior];state.record.usage={inputTokens:value('inputTokens') as number|undefined,outputTokens:value('outputTokens') as number|undefined,totalTokens:value('totalTokens') as number|undefined,complete:['inputTokens','outputTokens','totalTokens'].every(key=>typeof usage[key]==='number'),source:'codex:thread/tokenUsage/updated'};}break;
       }
       case 'serverRequest/resolved':state.requests.delete(String(p.requestId));break;
       case 'model/rerouted':state.record.runtimeModel=p.toModel??p.model;break;

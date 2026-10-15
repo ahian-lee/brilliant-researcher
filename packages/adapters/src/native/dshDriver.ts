@@ -8,6 +8,7 @@ export interface NativeDshOptions extends Omit<DshBridgeOptions,'mcpServers'> {
   mcpServers?:DshMcpServer[]|((record:NativeRecord)=>DshMcpServer[]);
 }
 interface State {record:NativeRecord;bridge:DshBridge;events:Map<number,any>;approvals:Map<string,NativeApproval>;streams:Map<string,{text:string;at:string}>;running:boolean;cancelled:boolean;lastTurnStart:number;finalSeen:boolean;failed?:boolean;}
+const advance=(previous:string|undefined,next:string)=>!previous||next>previous?next:previous;
 const iso=(time?:number)=>new Date(time??Date.now()).toISOString();
 const contentText=(content:any)=>Array.isArray(content)?content.filter((p:any)=>p.type==='text').map((p:any)=>p.text??'').join('\n'):typeof content==='string'?content:'';
 
@@ -73,10 +74,21 @@ export class NativeDshDriver implements NativeDriver {
   private event(state:State,event:any,historical=false){
     if(event.type==='user/message'){const id=event.data?.id??event.data?.message?.id;for(const [seq,prior]of state.events)if(!Number.isInteger(seq)&&prior.data?.id===id)state.events.delete(seq);}
     state.events.set(event.seq,event);const record=state.record;const d=event.data??{};
+    if(event.type==='assistant/message'||event.type==='assistant/attempt'&&d.error){
+      const usage=d.message?.usage??d.usage??{};
+      const numeric=(...values:any[])=>values.find(value=>typeof value==='number'&&Number.isFinite(value)&&value>=0);
+      const inputTokens=numeric(usage.inputTokens,usage.input),outputTokens=numeric(usage.outputTokens,usage.output);
+      const totalTokens=numeric(usage.totalTokens,usage.total),costUsd=numeric(usage.costUsd,usage.cost?.total);
+      // Saved native event identities make history replay and repeated delivery idempotent.
+      const ledger={...(record.native?.usageEntries??{})},key=event.type==='assistant/attempt'?'failed-attempt:'+String(d.attemptId??event.seq):String(d.message?.id??d.id??event.seq);ledger[key]={...ledger[key],...(inputTokens!==undefined?{inputTokens}:{}),...(outputTokens!==undefined?{outputTokens}:{}),...(totalTokens!==undefined?{totalTokens}:{}),...(costUsd!==undefined?{costUsd}:{})};
+      const values=Object.values(ledger) as Array<Record<string,number|undefined>>;
+      const sum=(key:string)=>values.every(value=>value[key]!==undefined)?values.reduce((total,value)=>total+value[key]!,0):undefined;
+      record.native={...record.native,usageEntries:ledger};record.usage={inputTokens:sum('inputTokens'),outputTokens:sum('outputTokens'),totalTokens:sum('totalTokens'),...(sum('costUsd')!==undefined?{costUsd:sum('costUsd')}:{}),complete:values.every(value=>['inputTokens','outputTokens','totalTokens'].every(key=>value[key]!==undefined)),source:'dsh:assistant-events'};
+    }
     if(event.type==='turn/start'){state.lastTurnStart=event.seq;state.finalSeen=false;state.cancelled=false;delete record.error;if(record.native)delete record.native.lastAttemptError;if(!historical){state.running=true;record.status='running';}}
-    if(event.type==='assistant/message'){state.finalSeen=true;record.lastMessageAt=iso(event.time);state.streams.clear();const source=d.message?.source;if(source?.provider&&source?.model)record.runtimeModel=`${source.provider}/${source.model}`;}
-    if(event.type==='user/message')record.lastMessageAt=iso(event.time);
-    if(event.type.startsWith('tool/'))record.lastActivityAt=iso(event.time);
+    if(event.type==='assistant/message'){state.finalSeen=true;record.lastMessageAt=advance(record.lastMessageAt,iso(event.time));state.streams.clear();const source=d.message?.source;if(source?.provider&&source?.model)record.runtimeModel=`${source.provider}/${source.model}`;}
+    if(event.type==='user/message')record.lastMessageAt=advance(record.lastMessageAt,iso(event.time));
+    if(event.type.startsWith('tool/'))record.lastActivityAt=advance(record.lastActivityAt,iso(event.time));
     if(event.type==='model/selection')this.applyConfig(record,{model:d});
     if(event.type==='permission/preset')this.applyConfig(record,{permissionPreset:d.preset});
     if(event.type==='turn/end'){
@@ -91,7 +103,7 @@ export class NativeDshDriver implements NativeDriver {
   }
   private stream(state:State,frame:any):boolean{
     if(frame.type==='start')state.streams.set(frame.attemptId,{text:'',at:iso()});
-    if(frame.type==='chunk'&&frame.chunk?.type==='text-delta'){const entry=state.streams.get(frame.attemptId)??{text:'',at:iso(frame.time)};entry.text+=frame.chunk.text??'';state.streams.set(frame.attemptId,entry);state.record.lastMessageAt=iso(frame.time);return true;}
+    if(frame.type==='chunk'&&frame.chunk?.type==='text-delta'){const entry=state.streams.get(frame.attemptId)??{text:'',at:iso(frame.time)};entry.text+=frame.chunk.text??'';state.streams.set(frame.attemptId,entry);state.record.lastMessageAt=advance(state.record.lastMessageAt,iso(frame.time));return true;}
     if(frame.type==='end')return state.streams.delete(frame.attemptId);
     return false;
   }
@@ -124,15 +136,17 @@ export class NativeDshDriver implements NativeDriver {
     if(record.error)record.status='error';
     return this.snapshot(historical);
   }
-  async send(record:NativeRecord,message:string):Promise<{accepted:boolean;status?:string}>{
+  async send(record:NativeRecord,message:string,assertDispatch?:()=>void):Promise<{accepted:boolean;status?:string}>{
     if(!message.trim())throw new Error('DSH message is empty');await this.open(record);const state=this.states.get(record.id)!;
+    // open may await the native writer; do not deliver a revoked action afterwards.
+    assertDispatch?.();
     const method=state.running?'session.steer':'session.prompt';state.cancelled=false;delete record.error;
     state.running=true;record.status=state.approvals.size?'waiting_input':'running';this.update(state);
     let sent:any;try{sent=await state.bridge.request(method,{sessionId:record.nativeId,content:[{type:'text',text:message}]});}catch(error){state.running=false;record.error=safeDshError(error);record.status='error';this.update(state);throw error;}
     if(![...state.events.values()].some(e=>e.type==='user/message'&&(e.data?.id===sent.messageId||e.data?.message?.id===sent.messageId))){const seq=Math.max(-1,...state.events.keys())+0.001;state.events.set(seq,{seq,type:'user/message',time:Date.now(),data:{id:sent.messageId,content:[{type:'text',text:message}]}});}
     this.update(state);return {accepted:true,status:record.status};
   }
-  async interrupt(record:NativeRecord){await this.open(record);const state=this.states.get(record.id)!;state.cancelled=true;await state.bridge.request('session.cancel',{sessionId:record.nativeId});this.update(state);return {ok:true};}
+  async interrupt(record:NativeRecord){await this.open(record);const state=this.states.get(record.id)!;state.cancelled=true;await state.bridge.request('session.cancel',{sessionId:record.nativeId});this.update(state);return {ok:true,confirmed:!state.running,status:record.status};}
   async configure(record:NativeRecord,input:{model?:string|null;thinkingOptionId?:string|null;permissionPreset?:'auto'|'danger-full-access';modeId?:'auto'|'full-access'}){
     await this.open(record);const state=this.states.get(record.id)!;const params:any={sessionId:record.nativeId};
     if(input.model!==undefined||input.thinkingOptionId!==undefined)params.model=this.selection(state.bridge,input.model??record.model,input.thinkingOptionId,record.native?.modelSelection);

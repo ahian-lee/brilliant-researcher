@@ -1,4 +1,6 @@
 import { useI18n, catalogGroupKey, LanguageSwitcher } from '../i18n';
+import { BudgetFields, budgetChanges } from './ProjectBudget';
+import type { WorkbenchBudget } from '../workbenchTypes';
 import { useEffect, useRef, useState } from 'react';
 import { createWorkbenchProject, fetchWorkbenchModels, fetchWorkbenchProviders, fetchWorkbenchSkills } from '../workbenchApi';
 import { useAsync } from '../hooks/useAsync';
@@ -95,6 +97,8 @@ export function NewResearchDialog({ onClose, onCreated }: {
   const [accessMode,setAccessMode]=useState<'full'|'review'>('full');
   const [mode, setMode] = useState<'free' | 'skill' | 'pipeline'>('free');
   const [autoCollaborate, setAutoCollaborate] = useState(true);
+  const [budgetValues,setBudgetValues]=useState<Record<string,string>>({});
+  const [budgetDirty,setBudgetDirty]=useState<Set<string>>(new Set());
   const [skills, setSkills] = useState<WorkbenchSkill[]>([]);
   const [skillId, setSkillId] = useState('');
   const [skillSearch, setSkillSearch] = useState('');
@@ -129,10 +133,12 @@ export function NewResearchDialog({ onClose, onCreated }: {
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
     if (submitting.current || !name.trim() || !goal.trim() || !ready) return;
+    let budget:WorkbenchBudget|undefined;
+    try{const patch=budgetChanges(budgetValues,budgetDirty,{});if(Object.keys(patch).length)budget=patch as WorkbenchBudget;}catch(err){setError(err instanceof Error?err.message:String(err));return;}
     submitting.current = true;
     setBusy(true); setError('');
     try {
-      const result = await createWorkbenchProject({ name: name.trim(), goal: goal.trim(), provider: agent.provider, model: agent.model || undefined, thinkingOptionId: agent.thinkingOptionId || undefined, workflow: mode === 'free' ? 'free' : mode === 'pipeline' ? 'research-pipeline' : skillId, accessMode, autoCollaborate: mode === 'free' && autoCollaborate, constraints: constraints.trim() || undefined });
+      const result = await createWorkbenchProject({ name: name.trim(), goal: goal.trim(), provider: agent.provider, model: agent.model || undefined, thinkingOptionId: agent.thinkingOptionId || undefined, workflow: mode === 'free' ? 'free' : mode === 'pipeline' ? 'research-pipeline' : skillId, accessMode, autoCollaborate, budget, constraints: constraints.trim() || undefined });
       if (result.project) onCreated(result.project, result.error);
       else setError(result.error || "服务未返回新项目，请检查连接后重试。");
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
@@ -156,10 +162,11 @@ export function NewResearchDialog({ onClose, onCreated }: {
         <AgentFields idPrefix="new-research" value={agent} onChange={setAgent} disabled={busy} />
         <label htmlFor="project-mode">{tr("开始方式")}<select id="project-mode" value={mode} onChange={(event) => setMode(event.target.value as 'free' | 'skill' | 'pipeline')} disabled={busy}><option value="free">{tr("自由协作")}</option><option value="skill">{tr("ARIS 单项任务")}</option><option value="pipeline">{tr("完整研究流程")}</option></select></label>
         <p className="wb-mode-description wb-muted">{mode === 'free' ? tr("直接按首条指令工作，随时添加其他 agent 会话或使用 ARIS 技能。") : mode === 'skill' ? tr("选择一个真实 ARIS 技能，只围绕当前任务执行。") : tr("按 ARIS Research Pipeline 推进各研究阶段。")}</p>
-        {mode === 'free' ? <label className="wb-auto-review"><input type="checkbox" checked={autoCollaborate} onChange={(event) => setAutoCollaborate(event.target.checked)} disabled={busy} /><span><strong>{tr("自动执行与 Codex 审核")}</strong><small>{tr("执行者交付后由独立 Codex 会话检查，按反馈自动返修。聊天调整方向会同步两方。")}</small></span></label> : null}
+        {<label className="wb-auto-review"><input type="checkbox" checked={autoCollaborate} onChange={(event) => setAutoCollaborate(event.target.checked)} disabled={busy} /><span><strong>{tr("自动执行与 Codex 审核")}</strong><small>{tr("执行者交付后由独立 Codex 会话检查，按反馈自动返修。聊天调整方向会同步两方。")}</small></span></label>}
         {mode === 'skill' ? <div className="wb-form wb-task-picker"><label htmlFor="project-skill-search">{tr("搜索 ARIS 任务")}<input id="project-skill-search" type="search" value={skillSearch} onChange={(event) => setSkillSearch(event.target.value)} disabled={busy} placeholder={tr("搜索名称或用途")} /></label><label htmlFor="project-skill">{tr("ARIS 任务")}<select id="project-skill" value={skillId} onChange={(event) => setSkillId(event.target.value)} disabled={busy || skillLoading}><option value="">{skillLoading ? tr("正在读取任务…") : tr("选择一项任务")}</option>{selectedSkill && !filteredSkills.some((skill) => skill.id === skillId) ? <option value={selectedSkill.id}>{tr(selectedSkill.title || selectedSkill.name)}{tr("（已选择）")}</option> : null}{filteredSkills.map((skill) => <option key={skill.id} value={skill.id}>{tr(skill.title || skill.name)} · {tr(catalogGroupKey(skill.group))}</option>)}</select></label>{selectedSkill ? <p className="wb-muted">{selectedSkill.description}</p> : null}{!skillLoading && !filteredSkills.length && !skillError ? <p className="wb-muted">{tr("没有符合条件的任务。")}</p> : null}{skillError ? <p className="wb-error" role="alert">{tr("任务目录读取失败：")}{skillError} <button type="button" className="wb-text-button" onClick={() => setSkillRetry((value) => value + 1)} disabled={busy || skillLoading}>{tr("重试")}</button></p> : null}</div> : null}
         <label>{tr("执行权限")}<select value={accessMode} onChange={event=>setAccessMode(event.target.value as 'full'|'review')} disabled={busy}><option value="full">{tr("完全访问，按项目范围自主执行")}</option><option value="review">{tr("保留逐项权限复核")}</option></select></label><label htmlFor="research-constraints">{tr("项目范围与资源")}<textarea id="research-constraints" value={constraints} onChange={event=>setConstraints(event.target.value)} disabled={busy} rows={3} required /></label>
 
+        <details className="wb-new-project-budget"><summary>{tr('项目预算（可选）')}</summary><p className="wb-muted">{tr('不填写时使用默认预算；可在项目内随时调整。')}</p><BudgetFields idPrefix="new-budget" values={budgetValues} disabled={busy} onChange={(key,value)=>{setBudgetValues(previous=>({...previous,[key]:value}));setBudgetDirty(previous=>new Set([...previous,key]));}}/></details>
         {error ? <p className="wb-error" role="alert">{tr(error)}</p> : null}
         <div className="wb-form-footer"><button type="button" className="wb-button" onClick={onClose} disabled={busy}>{tr("取消")}</button><button type="submit" className="wb-button primary" disabled={busy || !ready || !name.trim() || !goal.trim()}>{busy ? tr("正在创建并启动…") : tr("创建并开始")}</button></div>
       </form>

@@ -62,6 +62,24 @@ export interface WorkbenchProjectCreated {
   [key: string]: unknown;
 }
 
+export interface WorkbenchBudget {
+  maxDurationMs?: number;
+  maxRevisions?: number;
+  maxTokens?: number;
+  maxCostUsd?: number;
+  maxConcurrentAgents?: number;
+  maxSubagents?: number;
+}
+export type WorkbenchBudgetPatch = Partial<Record<keyof WorkbenchBudget, number | null>>;
+export interface WorkbenchUsage {
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  totalTokens?: number | null;
+  costUsd?: number | null;
+  complete?: boolean;
+  source?: string;
+}
+
 export interface WorkbenchSession {
   id: string;
   provider: string;
@@ -75,7 +93,10 @@ export interface WorkbenchSession {
   permissionPreset?: string | null;
   modeId?: string | null;
   updatedAt?: string | null;
+  lastMessageAt?: string | null;
   role?: 'executor' | 'reviewer' | string;
+  delegation?: {parentSessionId?: string; collaborationId?: string; actionId?: string; revision?: number; task?: string};
+  usage?: WorkbenchUsage;
   error?: string;
 }
 
@@ -115,7 +136,7 @@ export interface WorkbenchProjectOverview {
   sessions: WorkbenchSession[];
   focus?: import('./types').Overview['focus'];
   collaboration?: WorkbenchCollaborationRun | null;
-  control?: { accessMode?: 'full'|'review'; scope?: string; error?: string; mode?: 'free' | 'skill' | 'pipeline'; workflow?: string; [key: string]: unknown };
+  control?: { budget?: WorkbenchBudget; reviewError?: string; accessMode?: 'full'|'review'; scope?: string; error?: string; mode?: 'free' | 'skill' | 'pipeline'; workflow?: string; [key: string]: unknown };
   error?: string;
 }
 
@@ -144,6 +165,12 @@ export interface WorkbenchCollaborationRun {
   round: number;
   revisionsUsed: number;
   maxRevisions: number;
+  maxDurationMs?: number;
+  maxTokens?: number;
+  maxCostUsd?: number;
+  maxConcurrentAgents?: number;
+  maxSubagents?: number;
+  usage?: WorkbenchUsage;
   updatedAt: number;
   directions: Array<{ revision: number; text: string; at: number }>;
   actions: Array<{
@@ -154,7 +181,7 @@ export interface WorkbenchCollaborationRun {
     revision: number;
     round: number;
     status: 'planned' | 'sending' | 'sent' | 'unknown' | 'rejected' | 'replied' | 'obsolete';
-    reply?: { kind: 'execute'; summary: string; artifacts: string[]; tests: string[] } | { kind: 'review'; verdict: 'accept' | 'revise'; feedback: string; checks: string[] } | { kind: 'sync'; summary: string } | WorkbenchPlanReply;
+    reply?: { kind: 'execute'; summary: string; artifacts: string[]; tests: string[]; outcome?: 'completed' | 'blocked'; reason?: string } | { kind: 'review'; verdict: 'accept' | 'revise'; feedback: string; checks: string[] } | { kind: 'sync'; summary: string } | WorkbenchPlanReply;
   }>;
   events: Array<{ id: string; at: number; message: string; revision: number; round: number }>;
   reason?: string;
@@ -167,6 +194,7 @@ export interface WorkbenchMessage {
   role: string;
   text: string;
   at?: string | null;
+  final?: boolean;
 }
 
 export interface WorkbenchApprovalOption {
@@ -220,6 +248,7 @@ export type WorkbenchProjectRequest = {
   thinkingOptionId?: string;
   workflow: string;
   autoCollaborate?: boolean;
+  budget?: WorkbenchBudget;
   accessMode?: 'full'|'review';
   constraints?: string;
 };
@@ -231,6 +260,7 @@ export type WorkbenchSessionRequest = {
   workflow?: string;
   role?: 'executor' | 'reviewer';
   prompt?: string;
+  idle?: boolean;
 };
 
 export type WorkbenchLegacyProject = Project;

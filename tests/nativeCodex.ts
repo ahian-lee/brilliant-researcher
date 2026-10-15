@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {NativeRuntime} from '../packages/adapters/src/nativeRuntime.ts';
 import { NativeCodexDriver } from '../packages/adapters/src/native/codexDriver.ts';
 import type { NativeRecord } from '../packages/adapters/src/native/types.ts';
 const updates:any[]=[];
@@ -47,3 +51,31 @@ client.receive({id:11,method:'unknown/call',params:{threadId:'native-uuid'}});as
 client.receive({id:12,method:'currentTime/read',params:{}});assert.equal(typeof sent.at(-1).result.currentTimeAt,'number');
 assert(updates.some(u=>u.status==='waiting_input'));
 await driver.close();console.log('PASS native Codex protocol: start, steer, streaming, permissions, questions, interrupt, configuration, paginated persisted history');
+
+// An empty pre-send app-server thread can be ephemeral. Rebuild only with the
+// persisted native-empty-session measurement AND its empty saved snapshot.
+for(const missingAt of ['resume','read'] as const){
+ const row:NativeRecord={id:'kept-'+missingAt,nativeId:'ephemeral-'+missingAt,provider:'codex',title:'idle reviewer',cwd:'/tmp/fixture',status:'idle',model:'configured-model',usage:{source:'native-empty-session',inputTokens:0,outputTokens:0,totalTokens:0,costUsd:0,complete:true},delegation:{parentSessionId:'parent',collaborationId:'collab',actionId:'action',revision:3,task:'idle child'}};
+ const prior={session:row,messages:[],activity:[],approvals:[]};let starts=0;const methods:string[]=[];
+ const recovered=new NativeCodexDriver({executable:'unused',onUpdate:()=>{}}),rpc=recovered as any;rpc.connect=async()=>{};
+ rpc.request=async(method:string,params:any)=>{methods.push(method);if(method==='thread/resume'){if(missingAt==='resume')throw Error('Codex RPC: no rollout found for thread');return {thread:{id:row.nativeId,status:{type:'idle'},turns:[]}};}if(method==='thread/start'){starts++;return {thread:{id:'replacement-'+missingAt,status:{type:'idle'},turns:[]}};}if(method==='thread/read')throw Error('Codex RPC: no rollout found for thread '+params.threadId);return {};};
+ const snapshots=await Promise.all([recovered.inspect(row,prior),recovered.inspect(row,prior)]);await recovered.inspect(row,prior);await recovered.open(row,prior);
+ assert.equal(starts,1,'concurrent and repeated reads must share the one empty-thread replacement');assert.equal(row.id,'kept-'+missingAt);assert.equal(row.nativeId,'replacement-'+missingAt);assert.equal(row.delegation!.actionId,'action');assert.equal(row.model,'configured-model');assert.equal(row.usage!.totalTokens,0);assert.equal(snapshots[0].messages.length,0);assert.equal(row.native!.emptyThreadRecoveries.length,1);assert.equal(row.native!.emptyThreadRecoveries[0].nativeId,'ephemeral-'+missingAt);assert.equal(row.native!.emptyThreadRecoveries[0].replacementNativeId,row.nativeId);assert(!rpc.byThread.has('ephemeral-'+missingAt));assert.equal(methods.filter(method=>method==='turn/start').length,0);await recovered.close();
+}
+for(const unsafe of ['messages','read-nonempty','activity','sent','unknown-usage','unknown-snapshot','older-history','nonzero-usage'] as const){
+ const row:NativeRecord={id:'preserve-'+unsafe,nativeId:'original-'+unsafe,provider:'codex',title:'kept',cwd:'/tmp/fixture',status:'idle',usage:{source:'native-empty-session',inputTokens:0,outputTokens:0,totalTokens:0,costUsd:0,complete:true}};
+ const prior:any={session:row,messages:['messages','read-nonempty'].includes(unsafe)?[{id:'saved-message',role:'assistant',text:'existing research evidence'}]:[],activity:unsafe==='activity'?[{id:'saved-tool',tool:'commandExecution',summary:'existing measured operation'}]:[],approvals:[],...(unsafe==='older-history'?{hasOlderMessages:true}:{})};
+ if(unsafe==='sent')row.native={lastPromptAt:'2026-01-01T00:00:00Z'};if(unsafe==='unknown-usage')delete row.usage;if(unsafe==='nonzero-usage')row.usage!.totalTokens=1;
+ let starts=0;const rejected=new NativeCodexDriver({executable:'unused',onUpdate:()=>{}}),rpc=rejected as any;rpc.connect=async()=>{};rpc.request=async(method:string)=>{if(method==='thread/start')starts++;if(unsafe==='read-nonempty'&&method==='thread/resume')return {thread:{id:row.nativeId,status:{type:'idle'},turns:[]}};throw Error('Codex RPC: no rollout found for original thread');};
+ await assert.rejects(rejected.inspect(row,unsafe==='unknown-snapshot'?undefined:prior),/no rollout found/);assert.equal(starts,0,'never replace a sent, nonempty or unverified thread');assert.equal(row.nativeId,'original-'+unsafe);if(['messages','read-nonempty'].includes(unsafe))assert.equal(rpc.state(row).snapshot.messages[0].text,'existing research evidence');if(unsafe==='activity')assert.equal(rpc.state(row).snapshot.activity[0].summary,'existing measured operation');assert.equal(row.native?.emptyThreadRecoveries,undefined);await rejected.close();
+}
+console.log('PASS Codex empty-thread recovery: resume/read no-rollout replaces only proven pre-send empty threads once, preserving BRI identity/delegation and old native ID; existing or unknown history remains untouched');
+
+const emptyDirectory=mkdtempSync(join(tmpdir(),'bri-codex-empty-recovery-'));let recoveredStarts=0,sendMarkerChecked=false;
+const owner=new NativeRuntime(emptyDirectory,update=>{const d=new NativeCodexDriver({executable:'unused',onUpdate:update}),rpc=d as any;rpc.connect=async()=>{};rpc.request=async(method:string)=>{if(method==='turn/start'){sendMarkerChecked=!!JSON.parse(readFileSync(join(emptyDirectory,'stable-reviewer-binding.json'),'utf8')).record.native.lastPromptAt;throw Error('native accepted but send receipt was lost');}if(method==='thread/start'){recoveredStarts++;return {thread:{id:'persisted-replacement',status:{type:'idle'},turns:[]}};}throw Error('Codex RPC: no rollout found for empty thread');};return {codex:d};});
+try{
+ const original:NativeRecord={id:'stable-reviewer-binding',nativeId:'missing-ephemeral-thread',provider:'codex',title:'reviewer binding',status:'idle',cwd:emptyDirectory,usage:{source:'native-empty-session',inputTokens:0,outputTokens:0,totalTokens:0,costUsd:0,complete:true}};
+ owner.import(original,{session:original,messages:[],activity:[],approvals:[]});await owner.inspectSession(original.id);await owner.inspectSession(original.id);
+ const persisted=JSON.parse(readFileSync(join(emptyDirectory,original.id+'.json'),'utf8'));assert.equal(persisted.record.id,'stable-reviewer-binding');assert.equal(persisted.record.nativeId,'persisted-replacement');assert.equal(persisted.record.native.emptyThreadRecoveries[0].nativeId,'missing-ephemeral-thread');assert.equal(persisted.snapshot.messages.length,0);assert.equal(recoveredStarts,1);await assert.rejects(owner.sendMessage(original.id,'first actual user prompt'),/receipt was lost/);assert.equal(sendMarkerChecked,true,'durably mark the first send before the native request, so a lost receipt or crash cannot make it look empty again');await assert.rejects(owner.inspectSession(original.id),/no rollout found/);assert.equal(recoveredStarts,1,'a send-unknown session must never be rebuilt as empty');
+}finally{await owner.close();rmSync(emptyDirectory,{recursive:true,force:true});}
+console.log('PASS Codex empty-thread owner persistence: saved empty snapshot is passed to the driver, stable binding and recovery audit are written once; no provider calls');

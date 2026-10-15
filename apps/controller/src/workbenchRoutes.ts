@@ -46,6 +46,8 @@ export function registerWorkbenchRoutes(app: FastifyInstance, workbench: Researc
   app.post('/api/workbench/projects/:projectId/collaboration/steer', handle(req => requireWorkbench().steerCollaboration?.(req.params.projectId, req.body?.message, {auditFirst:req.body?.auditFirst}) ?? Promise.reject(new WorkbenchError('自动协作未配置', 503))));
   app.post('/api/workbench/projects/:projectId/collaboration/pause', handle(req => requireWorkbench().pauseCollaboration?.(req.params.projectId) ?? Promise.reject(new WorkbenchError('自动协作未配置', 503))));
   app.post('/api/workbench/projects/:projectId/access', handle(req => requireWorkbench().setAccess(req.params.projectId, req.body ?? {})));
+  app.post('/api/workbench/projects/:projectId/budget', handle(req => requireWorkbench().setBudget(req.params.projectId, req.body ?? {})));
+  app.patch('/api/workbench/projects/:projectId/budget', handle(req => requireWorkbench().setBudget(req.params.projectId, req.body ?? {})));
   app.get('/api/workbench/projects/:projectId/attention', handle(req => requireWorkbench().attention(req.params.projectId)));
   app.post('/api/workbench/projects/:projectId/completion', handle(req => requireWorkbench().setCompleted(req.params.projectId, req.body?.completed)));
   app.post('/api/workbench/projects/:projectId/export', handle(async (req, reply) => {
@@ -65,7 +67,7 @@ export function registerWorkbenchRoutes(app: FastifyInstance, workbench: Researc
   app.get('/api/workbench/projects/:projectId/sessions/:sessionId', handle(req => requireWorkbench().session(req.params.projectId, req.params.sessionId)));
   app.post('/api/workbench/projects/:projectId/sessions/:sessionId/messages', handle(req => requireWorkbench().send(req.params.projectId, req.params.sessionId, req.body?.message, req.body?.iteration,req.body?.auditFirst)));
   app.post('/api/workbench/projects/:projectId/sessions/:sessionId/config', handle(req => requireWorkbench().configure(req.params.projectId, req.params.sessionId, req.body ?? {})));
-  app.post('/api/workbench/projects/:projectId/sessions/:sessionId/interrupt', handle(req => requireWorkbench().interrupt(req.params.projectId, req.params.sessionId)));
+  app.post('/api/workbench/projects/:projectId/sessions/:sessionId/interrupt', handle(req => requireWorkbench().stopTask(req.params.projectId, req.params.sessionId)));
   app.post('/api/workbench/projects/:projectId/sessions/:sessionId/approvals/:approvalId', handle(req => requireWorkbench().approve(req.params.projectId, req.params.sessionId, req.params.approvalId, req.body?.optionId)));
   app.post('/api/workbench/projects/:projectId/sessions/:sessionId/questions/:approvalId', handle(req => requireWorkbench().answerQuestion(req.params.projectId, req.params.sessionId, req.params.approvalId, req.body?.answers ?? {}, req.body?.cancel)));
   app.get('/api/workbench/projects/:projectId/artifact', handle((req, reply) => {

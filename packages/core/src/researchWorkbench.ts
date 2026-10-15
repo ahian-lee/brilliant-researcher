@@ -1,6 +1,7 @@
 import { readerBriefingInstruction } from './readerBriefing.ts';
 import type { RecordedDecision } from '../../adapters/src/researchFocus.ts';
 import type { CollaborationRun } from './collaborationLoop.ts';
+import { updateProjectBudget, type ProjectBudget, type NativeUsage, type Delegation, type CollaborationScope } from './projectBudget.ts';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
@@ -9,8 +10,10 @@ import { readProjectWorkspace, readSkillCatalog } from '../../adapters/src/arisW
 
 export interface LiveSession {
   id: string; provider: string; title: string; status: string; cwd?: string;
-  model?: string; updatedAt?: string | null; role?: string;
+  model?: string; updatedAt?: string | null; lastMessageAt?: string | null; role?: string;
   parentId?: string;
+  delegation?: Delegation;
+  usage?: NativeUsage;
   thinkingOptionId?: string | null; configuredThinkingOptionId?: string | null;
   configuredModel?: string | null; runtimeModel?: string | null;
   modeId?: string | null; permissionPreset?: string | null;
@@ -28,13 +31,17 @@ export interface ResearchRuntime {
   createSession(input: { cwd: string; provider: string; model?: string; thinkingOptionId?: string; permissionPreset?: 'auto' | 'danger-full-access'; modeId?: 'full-access' | 'auto'; prompt?: string; title?: string }): Promise<LiveSession>;
   updateSession?(id: string, input: { cwd: string; model?: string | null; thinkingOptionId?: string | null; permissionPreset?: 'auto' | 'danger-full-access'; modeId?: 'full-access' | 'auto' }): Promise<{ ok: boolean; session: LiveSession; notice?: string }>;
   inspectSession(id: string): Promise<{ activity?: Array<{ id: string; tool: string; summary: string; status?: string; target?: string; description?: string; error?: string; at?: string }>; activeTurn?: unknown; session: LiveSession; messages: Array<{ id: string; role: string; text: string; at?: string | null }>; approvals?: unknown[] }>;
-  sendMessage(id: string, message: string): Promise<{ accepted: boolean; status?: string }>;
-  interruptSession(id: string): Promise<{ ok: boolean }>;
+  sendMessage(id: string, message: string, context?: { collaboration?: CollaborationScope }): Promise<{ accepted: boolean; status?: string }>;
+  setCollaborationScope?(id: string, scope: CollaborationScope | null): Promise<unknown>;
+  listDescendants?(parentSessionId: string): Promise<LiveSession[]>;
+  interruptDescendants?(parentSessionId: string): Promise<unknown>;
+  interruptSession(id: string): Promise<{ ok: boolean; confirmed?: boolean; status?: string }>;
   respondApproval(id: string, approvalId: string, optionId: string): Promise<{ ok: boolean }>;
   respondQuestion?(id: string, approvalId: string, answers: Record<string, { selected: string[]; text?: string }>, cancel?: boolean): Promise<{ ok: boolean }>;
 }
 interface Binding { id: string; role: string; workflow: string; title: string; provider: string }
 interface Control {
+  budget?: ProjectBudget;
   accessMode?: 'full' | 'review';
   scope?: string;
   workflow: string; createdAt: string; updatedAt: string; sessions: Binding[];
@@ -85,6 +92,7 @@ export class ResearchWorkbench {
   readonly arisRoot: string;
   private locks = new Set<string>();
   private decisionLocks = new Set<string>();
+  private directDispatches = new Map<string,AbortController>();
   private sessionCache: { at: number; sessions: LiveSession[] } | null = null;
   private sessionRequest: Promise<LiveSession[]> | null = null;
   collaborationStatus?: (id: string) => CollaborationRun | null;
@@ -140,6 +148,7 @@ export class ResearchWorkbench {
   private writeControl(project: ArisProjectRegistration, control: Control, policyChange = false): void {
     const latest = this.control(project);
     if (!policyChange && latest?.accessMode) { control.accessMode=latest.accessMode; control.scope=latest.scope; }
+    if (!policyChange && latest?.budget) control.budget = latest.budget;
     const latestDirections = latest?.userDirections ?? [];
     const directions = [...latestDirections, ...(control.userDirections ?? [])];
     if (directions.length) control.userDirections = directions.filter((item, index) => directions.findIndex(other => other.at === item.at && other.text === item.text && other.sessionId === item.sessionId) === index).sort((a, b) => a.at.localeCompare(b.at)).slice(-12);
@@ -205,7 +214,7 @@ export class ResearchWorkbench {
         control.launch = { ...pending, state: 'ready' }; delete control.error; this.writeControl(project, control);
       }
     }
-    return sessions.map(session => ({ ...session, role: control.sessions.find(s => s.id === session.id)?.role ?? 'executor' }));
+    return sessions.map(session => ({ ...session, role: control.sessions.find(s => s.id === session.id)?.role ?? (session.delegation ? 'subagent' : session.role ?? 'executor') }));
   }
   executionScope(id: string): string {
     const project = this.project(id), control = this.control(project);
@@ -221,6 +230,24 @@ export class ResearchWorkbench {
     if (detail.activeTurn || detail.approvals?.length || !['idle','completed','stopped','interrupted','failed','error','canceled'].includes(detail.session.status)) throw new WorkbenchError('新权限将在当前回合结束后应用',409);
     await this.options.runtime.updateSession(sessionId,{cwd:project.root,...settings}); this.invalidate();
   }
+  private async sendDirect(id: string, sessionId: string, message: string) {
+    if(this.directDispatches.has(sessionId))throw new WorkbenchError('此会话正在发送任务，请等待结果',409);
+    const dispatch=new AbortController();this.directDispatches.set(sessionId,dispatch);
+    try{
+    const control=this.control(this.project(id));
+    if (!this.options.runtime.setCollaborationScope) {
+      if (control?.budget && Object.keys(control.budget).length) throw new WorkbenchError('此执行后台尚不支持预算；请升级原生后台后再执行', 503);
+      return await this.options.runtime.sendMessage(sessionId,message);
+    }
+    const stopped=await this.stopDirectFamily(id,sessionId,15000);
+    if(!stopped.confirmed)throw new WorkbenchError(stopped.error||'旧方向的父子任务尚未确认停止；新消息未发送，内容保留',409);
+    if(dispatch.signal.aborted)throw new WorkbenchError('用户已停止任务；新消息未发送，内容保留',409);
+    const scope:CollaborationScope={collaborationId:`direct-${randomUUID()}`,actionId:randomUUID(),revision:1,task:message,createdAt:Date.now(),active:true,...control?.budget};
+    await this.options.runtime.setCollaborationScope(sessionId,scope);
+    if(dispatch.signal.aborted){await this.options.runtime.setCollaborationScope(sessionId,null);throw new WorkbenchError('用户已停止任务；新消息未发送，内容保留',409);}
+    return await this.options.runtime.sendMessage(sessionId,message,{collaboration:scope});
+    }finally{if(this.directDispatches.get(sessionId)===dispatch)this.directDispatches.delete(sessionId);}
+  }
   async setAccess(id: string, input: Record<string, unknown>) {
     if (!['full','review'].includes(String(input.accessMode))) throw new WorkbenchError('请选择项目自主执行或逐项复核');
     const scope = text(input.scope,'项目范围');
@@ -232,6 +259,19 @@ export class ResearchWorkbench {
       try { await this.prepareSessionAccess(id,session.id); applied.push(session.id); } catch { pending.push(session.id); }
     }
     return {accessMode:control.accessMode,scope,applied,pending};
+  }
+  setBudget(id: string, input: Record<string, unknown>): {budget: ProjectBudget} {
+    const project = this.project(id), control = this.control(project);
+    if (!control) throw new WorkbenchError('项目尚未建立工作台', 409);
+    try { control.budget = updateProjectBudget(control.budget, input.budget); }
+    catch (error) { throw new WorkbenchError(errorText(error)); }
+    this.writeControl(project, control, true);
+    return {budget: control.budget};
+  }
+  automationTask(id: string, task: string): string {
+    const project = this.project(id), control = this.control(project);
+    if (!control || control.workflow === 'free') return task;
+    return this.prompt(project, control.workflow, 'executor', task, control, true);
   }
   async workspace(id: string) {
     const project = this.project(id);
@@ -261,7 +301,7 @@ export class ResearchWorkbench {
     if (workflow === 'free') return `# ${project.name}\n\n## 本次任务\n${project.goal}\n\n## 协作方式\n自由协作。执行者：${provider}${model ? ` / ${model}` : ''}。通过项目对话继续、调整和拆分任务；可按需让其他 coding agent 实现或审核，也可只调用一个 ARIS 技能。无需启动完整科研流程或生成论文。\n\n## 范围与约束\n${project.constraints || '按用户任务访问必要的文件与目录，交付结果优先保存在本项目。删除文件、修改系统权限或增加费用等操作按授权范围交由审核链判断。'}\n\n## 交付\n保留实际代码、文件和验证结果。图表可登记 .aris/figures.json 供工作台预览；仅当实际使用 ARIS 多阶段流程时才写其原生阶段状态。\n`;
     return `# ${project.name}\n\n## 研究目标\n${project.goal}\n\n## 执行与审核\n执行者：${provider}${model ? ` / ${model}` : ''}。独立审核：Codex。ARIS 技能：${workflow}。\n\n## 范围与资源\n${project.constraints || '在本项目目录中推进研究；需要新增付费、远端资源或扩大研究范围时明确提出，等待用户决定。'}\n\n## 交付与沟通\n保留可追溯的原始资料、实验代码、图表与结论。完成条件以目标和用户后续对话为准。通过 ARIS 原生记录区分执行完成和独立审核通过；不能自行将 done 当成 accepted。更新 .aris/progress.json 的摘要、下一步、卡点与待用户决定的问题。图表登记 .aris/figures.json，标明主图或补充图，保留源文件。\n`;
   }
-  private prompt(project: ArisProjectRegistration, workflow: string, role: string, extra: string | undefined, control: Control): string {
+  private prompt(project: ArisProjectRegistration, workflow: string, role: string, extra: string | undefined, control: Control, managed = false): string {
     const runId = `workbench-${randomUUID().slice(0, 12)}`;
     const reviewer = control.sessions.find(s => s.role === 'reviewer');
     if (workflow === 'free') return [
@@ -276,12 +316,13 @@ export class ResearchWorkbench {
     ].filter(Boolean).join('\n\n');
     return [
       `在研究目录 ${project.root} 中工作。目标：${project.goal || project.name}。执行角色：${role === 'reviewer' ? '独立审核者，依据真实产物给出评审，不替执行者自评通过' : '研究执行者'}。`,
+      managed ? '宿主协调规则：本轮使用工作台管理的执行→独立Codex审核→返修。读取并采用所选ARIS技能的研究方法、证据与交付要求；技能中的另开审核会话、codex exec、直接调用Codex MCP和内部多轮返修由工作台替代，不在执行会话内重复启动。所有需委派的子任务仅用BRI create_agent/get_agent/wait_agent，不另起未登记后台agent。只提交当前阶段真实成果及后台要求的最终JSON回执；不可自行标记accepted。真正受阻时返回outcome=blocked及原因，不因缺审核工具反复启动替代会话。' : '',
       `先阅读本目录 RESEARCH_BRIEF.md（若有），保留所有已有成果，用户在本会话中的新指示用于调整本项目。约束：${project.constraints || '只在本项目范围内工作；额外资源、成本与方向取舍需要用户决定。'}`,
       `本次执行 ARIS /${workflow}。技能原文：${join(this.arisRoot, 'skills', workflow, 'SKILL.md')}。共享技能与工具只读；ARIS_REPO=${this.arisRoot}，工具目录=${join(this.arisRoot, 'tools')}。按真实技能定义执行并读取它引用的必要文件；不要只给计划后停下。`,
       `若该技能有多阶段流程，使用 ARIS run_state.py 原生工具，独立 run_id=${runId}；不要改写其他仍在运行的流程。已有已验收且不受变更影响的步骤不重复。done 仅执行完成，accepted 必须有独立评审或该技能的确定性验证依据。`,
       `持续更新 .aris/progress.json：{run_id,executor,reviewer:"Codex",summary,next_step,updated_at,blockers:[{id,title,detail,status}],questions:[{id,title,detail,status}]}。questions 只写确需用户决定的范围/资源/方向取舍，普通任务故障写 blockers。`,
       `图片和图表保存到项目内，生成时更新 .aris/figures.json：{"figures":[{"path":"figures/figure-1.png","title":"标题","stage":"实际ARIS阶段id","role":"main"}]}。role 可为 main/supplementary/unclassified；保留可编辑源文件。图表文件和清单应随实际产出更新，不预填不存在的图片。`,
-      reviewer ? `本项目独立 Codex 审核会话 id=${reviewer.id}。宿主若提供 list_agents / send_agent_prompt / get_agent 等工具，只向这个本项目审核会话发送自足审核说明，等待真实评审回复，不能把工具ACK视为评审完成。若工具不可用或审核失败，明确登记 REVIEW_UNAVAILABLE，并通过对话说明。` : '当所选技能要求独立审核时，若无法调用审核者，记录 REVIEW_UNAVAILABLE，不可自评接受。',
+      managed ? '独立审核将由工作台在执行交付并确认子会话停止后自动派发给绑定Codex；不要向该审核会话调用send_agent_prompt，不再发起技能内部审核循环。保留原始数据、代码和阶段产物，阶段done只表示交付。' : `当前为直接执行，未启动工作台自动审核闭环。${reviewer ? `已绑定独立 Codex 审核会话 id=${reviewer.id}，用户可在工作台将产物交给它或开启自动协作。` : '需要独立审核时请在工作台连接审核者并开启自动协作。'}交付后说明尚待独立审核，不可自评accepted。技能中的另开Codex CLI、直接调用审核MCP及内部返修循环不在本次直接执行中启动；BRI子会话工具仅用于登记的子任务，不可用它给绑定审核者发送消息。`,
       role === 'reviewer' ? '你是独立审核会话：优先只读检查，提供证据、问题与修改建议；不要擅自扩大执行任务。' : '',
       extra ? `用户对本轮的具体要求（在既有授权范围内优先遵循）：\n${extra}` : '',
     ].filter(Boolean).join('\n\n');
@@ -293,7 +334,11 @@ export class ResearchWorkbench {
     const { model, thinkingOptionId } = await this.selection(provider, input);
     const workflow = input.workflow ? text(input.workflow, '任务方式', 100) : 'free';
     this.skill(workflow);
-    if (input.autoCollaborate === true && (workflow !== 'free' || !this.startCollaboration)) throw new WorkbenchError('自动协作目前用于自由任务，请选择自由协作方式');
+    let budget: ProjectBudget | undefined;
+    if (input.budget !== undefined) {
+      try { budget = updateProjectBudget({}, input.budget); } catch (error) { throw new WorkbenchError(errorText(error)); }
+    }
+    if (input.autoCollaborate === true && !this.startCollaboration) throw new WorkbenchError('自动协作服务尚未配置', 503);
     const providers = await this.options.runtime.providers();
     if (!providers.some(p => p.id === provider && p.available)) throw new WorkbenchError('所选执行者当前不可用', 503);
     const base = resolve(this.options.projectBase ?? join(this.options.repoRoot, 'research-projects'));
@@ -308,7 +353,7 @@ export class ResearchWorkbench {
     const project: ArisProjectRegistration = { id, name, goal, root, constraints: typeof input.constraints === 'string' ? input.constraints.slice(0, 20_000) : '', executor: provider, reviewer: 'Codex', supervisor: `${provider} / ARIS + Codex reviewer` };
     writeFileSync(join(root, workflow === 'free' ? 'PROJECT_BRIEF.md' : 'RESEARCH_BRIEF.md'), this.projectBrief(project, workflow, provider, model), 'utf8');
     const accessMode = input.accessMode === 'review' ? 'review' : 'full';
-    this.writeControl(project, { ...this.initialControl(workflow), accessMode, scope: project.constraints || '在本项目内自主读写、测试、修复和生成成果；可查公开资料。不得读取凭据、修改宿主配置或其他项目、增加费用。超出范围或需改变研究目标时再向用户提问。' });
+    this.writeControl(project, { ...this.initialControl(workflow), ...(budget ? {budget} : {}), accessMode, scope: project.constraints || '在本项目内自主读写、测试、修复和生成成果；可查公开资料。不得读取凭据、修改宿主配置或其他项目、增加费用。超出范围或需改变研究目标时再向用户提问。' });
     this.register(project);
     const publicProject = { ...project, source: 'aris', updated_at: new Date().toISOString(), plan_version: 0 };
     if (input.autoCollaborate === true) {
@@ -354,17 +399,22 @@ export class ResearchWorkbench {
       control.launch = { state: 'starting', title, role, workflow, provider, startedAt: new Date().toISOString() };
       delete control.error; this.writeControl(project, control);
       try {
+        const initialPrompt = input.idle === true ? undefined : reviewKey && role === 'reviewer' ? text(input.prompt, '审核任务', 60_000) : this.executionScope(id) + '\n\n' + this.prompt(project, workflow, role, typeof input.prompt === 'string' ? input.prompt.slice(0, 40_000) : undefined, control);
+        const scopedDirect = !!initialPrompt && !reviewKey && (!!this.options.runtime.setCollaborationScope || !!control.budget && Object.keys(control.budget).length>0);
         const session = await this.options.runtime.createSession({ cwd: project.root, provider,
           ...selection, title,
           ...(provider === 'dsh-pi' && !reviewKey && (control.accessMode === 'full' || this.options.dshAutoReview) ? { permissionPreset: control.accessMode === 'full' ? 'danger-full-access' as const : 'auto' as const } : {}),
           ...(provider === 'codex' && !reviewKey && control.accessMode === 'full' ? { modeId: 'full-access' as const } : {}),
-          prompt: input.idle === true ? undefined : reviewKey && role === 'reviewer' ? text(input.prompt, '审核任务', 60_000) : this.executionScope(id) + '\n\n' + this.prompt(project, workflow, role, typeof input.prompt === 'string' ? input.prompt.slice(0, 40_000) : undefined, control),
+          prompt: scopedDirect ? undefined : initialPrompt,
         });
         if (!session.id || !sameResearchDirectory(session.cwd, project.root)) throw new WorkbenchError('执行端返回的会话目录不匹配，未绑定到项目', 502);
         control.sessions.push({ id: session.id, role, workflow, provider, title: session.title });
         control.launch.state = 'ready'; this.writeControl(project, control); this.invalidate();
+        if(scopedDirect){const result=await this.sendDirect(id,session.id,initialPrompt!);if(!result.accepted)throw new WorkbenchError('执行端未接收任务');session.status=result.status||'running';}
         return { ...session, role };
       } catch (error) {
+        // The session may be valid while its first budgeted send was rejected.
+        if(control.launch?.state==='ready'){control.error=errorText(error);this.writeControl(project,control);throw error;}
         const preflight = ['UNSUPPORTED_MODE', 'INVALID_MODE', 'INVALID_MODEL', 'INVALID_THINKING_OPTION', 'PROVIDER_ERROR'].includes(String((error as {code?: string})?.code));
         control.launch.state = preflight ? 'ready' : 'unknown';
         control.error = `${preflight ? '尚未创建会话' : '会话创建未确认'}：${errorText(error)}`; this.writeControl(project, control); this.invalidate(); throw error;
@@ -542,7 +592,7 @@ export class ResearchWorkbench {
       // research stage merely because their records are in the same project.
       affected=selected.filter((s,i)=>iteration!=='all'&&i===0 || stages.find(latest=>latest.id===s.id)?.status!=='skipped').map(s=>s.id);
       if (!affected.length) throw new WorkbenchError('本项目尚无可重做的阶段');
-      const canCoordinate=run ? [run.executorSessionId,run.reviewerSessionId].includes(sessionId) : control.mode==='pipeline' && control.sessions.some(s=>s.id===sessionId&&s.role!=='reviewer') && control.sessions.some(s=>s.role==='reviewer'&&s.provider==='codex');
+      const canCoordinate=run ? [run.executorSessionId,run.reviewerSessionId].includes(sessionId) : control.sessions.some(s=>s.id===sessionId&&s.role!=='reviewer') && control.sessions.some(s=>s.role==='reviewer'&&s.provider==='codex');
       if (!canCoordinate || !this.startCollaboration) throw new WorkbenchError('请在项目绑定的执行或审核会话中重做',409);
       const scope=iteration==='all'?'从头重新研究（保留已跳过的可选阶段）':iteration.startsWith('only:')?`只重做「${stages[index].name}」`:`从「${stages[index].name}」起重新推进后续阶段`;
       content=`本轮范围：${scope}。受影响阶段：${affected.join('、')}。\n用户要求：${content}\n保留前轮成果与验收记录，为本轮使用新的 ARIS 记录。不覆盖旧结论；遵守已有数据、资源和用户决定约束。先检查已有产物和证据，再针对上述要求重做，由绑定 Codex 独立审核并自动返修。`;
@@ -558,18 +608,52 @@ export class ResearchWorkbench {
       this.setCompleted(id,false);
       return { accepted: true, status: updated.state };
     }
-    if(control.mode==='pipeline' && control.sessions.find(s=>s.id===sessionId)?.role!=='reviewer' && this.startCollaboration){
+    if((control.mode==='pipeline'||affected||auditFirst===true) && control.sessions.find(s=>s.id===sessionId)?.role!=='reviewer' && this.startCollaboration){
       const reviewer=control.sessions.find(s=>s.role==='reviewer'&&s.provider==='codex'&&!s.title.startsWith('BRI approval review '));
       if(reviewer){
         this.recordContinuation(id,sessionId,content,affected);
-        const updated=await this.startCollaboration(id,{reuseExisting:true,executorSessionId:sessionId,reviewerSessionId:reviewer.id,auditFirst:auditFirst??true,task:`继续本项目 ARIS 研究。保留原有成果与未受影响的验收。本轮增量要求：\n${content}\n阅读 .bri/workbench.json 中已回答的决定，不再重复提问。若旧流程已完成而新要求改变研究工作，另建后续 ARIS run，记录受影响阶段的重新推进，不篡改旧验收。当前闭环要求先交付可审核的阶段成果，再由绑定 Codex 独立核验，必要时自动返修。`});
+        const updated=await this.startCollaboration(id,{reuseExisting:true,executorSessionId:sessionId,reviewerSessionId:reviewer.id,auditFirst:auditFirst??true,task:`继续本项目任务。保留原有成果与未受影响的验收。本轮增量要求：\n${content}\n阅读 .bri/workbench.json 中已回答的决定，不再重复提问。若旧流程已完成而新要求改变研究工作，另建后续 ARIS run，记录受影响阶段的重新推进，不篡改旧验收。当前闭环要求先交付可审核的阶段成果，再由绑定 Codex 独立核验，必要时自动返修。`});
         this.setCompleted(id,false);
         return {accepted:true,status:updated.state};
       }
     }
+    if(auditFirst===true)throw new WorkbenchError('请先连接一个独立 Codex 审核会话，再启动审计规划',409);
     this.recordDirection(id, content, sessionId);
     await this.prepareSessionAccess(id, sessionId);
-    const result = await this.options.runtime.sendMessage(sessionId, this.executionScope(id) + '\n\n用户消息：\n' + content); this.invalidate(); return result;
+    const result = await this.sendDirect(id, sessionId, this.executionScope(id) + '\n\n用户消息：\n' + content); this.invalidate(); return result;
+  }
+  /** User task cancellation includes delegated work; orchestration uses interrupt() below. */
+  async stopTask(id: string, sessionId: string) {
+    let detail=await this.ownedSession(id,sessionId);
+    const seen=new Set<string>();
+    while(detail.session.delegation){if(seen.has(detail.session.id))throw new WorkbenchError('子任务关联无效',409);seen.add(detail.session.id);detail=await this.ownedSession(id,detail.session.delegation.parentSessionId);}
+    const parentId=detail.session.id,run=this.collaborationStatus?.(id);
+    this.directDispatches.get(parentId)?.abort();
+    if(run&&[run.executorSessionId,run.reviewerSessionId].includes(parentId)){
+      if(!this.pauseCollaboration)throw new WorkbenchError('自动协作暂停服务尚未配置',503);
+      const stopped=await this.pauseCollaboration(id);this.invalidate();
+      return {ok:true,confirmed:stopped?.state==='paused',status:stopped?.state??'unknown',sessionId:parentId};
+    }
+    return this.stopDirectFamily(id,parentId);
+  }
+  private async stopDirectFamily(id:string,parentId:string,waitMs=0){
+    const runtime=this.options.runtime,project=this.project(id);
+    await runtime.setCollaborationScope?.(parentId,null);
+    const children=await runtime.listDescendants?.(parentId)??[];
+    for(const child of children)if(!sameResearchDirectory(child.cwd,project.root))throw new WorkbenchError('子会话不属于当前项目',403);
+    const receipts=await Promise.allSettled([runtime.interruptSession(parentId),runtime.interruptDescendants?runtime.interruptDescendants(parentId):Promise.all(children.map(child=>runtime.interruptSession(child.id)))]);
+    const idleStates=new Set(['idle','completed','succeeded','stopped','interrupted','canceled','failed','error']);
+    const observe=async()=>{
+      const currentChildren=await runtime.listDescendants?.(parentId)??[];
+      for(const child of currentChildren)if(!sameResearchDirectory(child.cwd,project.root))throw new WorkbenchError('子会话不属于当前项目',403);
+      const observations=await Promise.allSettled([parentId,...currentChildren.map(child=>child.id)].map(childId=>runtime.inspectSession(childId)));
+      return observations.every(result=>result.status==='fulfilled'&&idleStates.has(result.value.session.status)&&!result.value.activeTurn&&!result.value.approvals?.length);
+    };
+    const deadline=Date.now()+waitMs;let confirmed=await observe();
+    while(!confirmed&&Date.now()<deadline){await new Promise(resolve=>setTimeout(resolve,100));confirmed=await observe();}
+    this.invalidate();
+    const failures=receipts.filter((result):result is PromiseRejectedResult=>result.status==='rejected').map(result=>errorText(result.reason));
+    return {ok:receipts.every(result=>result.status==='fulfilled'),confirmed,status:confirmed?'interrupted':'stopping',sessionId:parentId,...(failures.length?{error:failures.join('; ')}:{})};
   }
   async interrupt(id: string, sessionId: string) {
     await this.ownedSession(id, sessionId);
