@@ -90,7 +90,7 @@ For Windows users who need background processes independent of their launch term
 
 The dashboard host uses a detached child process and a Job Object to tie process cleanup to the owning host. The service scripts manage scheduled-task startup and recovery. Browser closure is separate from service shutdown; intentional shutdown must use the service's stop operation. Do not infer controller health from a surviving Vite development page.
 
-Linux and macOS compatibility is intended, but complete service and real-agent flows have not all been exercised there. Windows-native CI checks software behavior; live provider access still needs a local run.
+Linux and macOS compatibility is intended, but complete service and real-agent flows have not all been exercised there. The current GitHub CI runs software checks on Ubuntu with Node 24; Windows service behavior and live provider access require local verification.
 
 ## Trust and data boundaries
 
@@ -102,4 +102,4 @@ Local configuration, model credentials, research projects and native session rec
 
 ## Verification boundaries
 
-v0.2.0 live model acceptance is **pending**. [tests](../tests) contains runtime, collaboration, recovery, budget, scheduler, UI, workspace and export software checks. An isolated test, provider listing or build success does not prove live execution or scientific acceptance. Previous representative runs do not establish validation of this version, all ARIS skills, model endpoints or operating systems.
+The [README](../README.md#validation-status) and [workbench guide](research-workbench.md#verification-boundaries) record the versions and scenarios exercised with real agents. [tests](../tests) contains runtime, collaboration, recovery, budget, scheduler, UI, workspace and export software checks. An isolated test, provider listing or build success does not prove live execution or scientific acceptance. Representative runs do not establish validation of every ARIS skill, model endpoint or operating system.
