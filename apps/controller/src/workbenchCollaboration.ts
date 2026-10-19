@@ -221,6 +221,7 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
     if(workbench.control(project)?.mode==='pipeline'){
       const affected=workbench.control(project)?.continuation?.affectedStages??[];
       const followupId=`followup-${run.id}-r${event.revision}`;
+      let acceptedNativeId:string|undefined;
       // Audit-only iterations create no scientific run. A fresh native round
       // starts when the executor actually receives this revision's task.
       if(options.recordAris!==false && affected.length && action?.kind==='execute' && (event.type==='action_sent'&&action.status==='sent'||event.type==='execute_completed') && !existsSync(scoped(root,`.aris/runs/${followupId}.json`))){
@@ -243,12 +244,15 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
         const control=workbench.control(project)!;
         const affected=control.continuation?.affectedStages??[];
         if(!affected.length){publishBriefing(id,run,new ArisReader([project]).overview(id).focus.pipeline_run_id??'',acceptance);return;}
-        let nativeId=followupId;
+        // The startup follow-up is a fallback until the executor identifies
+        // its real, newly-created ARIS run. Review the delivered run itself.
+        const deliveredNativeId=actualRun(root,run);
+        let nativeId=deliveredNativeId??followupId;
         let native:any=null;
         if(nativeId){try{native=JSON.parse(readFileSync(scoped(root,`.aris/runs/${nativeId}.json`),'utf8'));}catch{}}
         const executor=(await workbench.session(id,run.executorSessionId)).session;
         const executorModel=executor.runtimeModel||executor.model||executor.configuredModel||'unknown';
-        const oldRound=!native||affected.some(stage=>!native.phases?.some((p:any)=>p.phase===stage));
+        const oldRound=!native||!deliveredNativeId&&affected.some(stage=>!native.phases?.some((p:any)=>p.phase===stage));
         if(oldRound){nativeId=`followup-${run.id}-r${event.revision}`;await aris(workbench,['start',root,nativeId,'--phases',affected.join(','),'--executor',executorModel]);native=JSON.parse(readFileSync(scoped(root,`.aris/runs/${nativeId}.json`),'utf8'));}
         const execution=run.actions.find(row=>row.id===run.lastExecutionId)?.reply;
         const receipts:Record<string,string>={};
@@ -258,8 +262,9 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
           for(const stage of affected){if(/review|审核|评审/i.test(stage))receipts[stage]=`${folder}/${action!.id}.json`;else if(/summary|summar|report|总结|汇总/i.test(stage))receipts[stage]=`${folder}/${run.lastExecutionId}.json`;}
         }
         acceptance=await acceptDelivered(id,nativeId!,run,action!.id,affected,receipts);
+        acceptedNativeId=nativeId;
       }
-      publishBriefing(id,run,new ArisReader([project]).overview(id).focus.pipeline_run_id??(affected.length?followupId:''),acceptance);
+      publishBriefing(id,run,acceptedNativeId??new ArisReader([project]).overview(id).focus.pipeline_run_id??(affected.length?followupId:''),acceptance);
       return;
     }
     const priorId=(()=>{try{return JSON.parse(readFileSync(scoped(root,'.aris/progress.json'),'utf8')).run_id;}catch{return undefined;}})();

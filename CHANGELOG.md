@@ -2,6 +2,7 @@
 
 ## 0.2.1 — 2026-10-20
 
+- Pipeline continuation records acceptance on the new ARIS run identified by the execution receipt and publishes that same run as current progress. The startup follow-up remains a fallback when no new native run is delivered; historical runs and undelivered phases are preserved. / 流程迭代将验收写回执行回执指明的新 ARIS 轮次，进度摘要使用同一轮；未交付新原生轮次时沿用启动记录，保留历史轮次与未交付阶段。
 - ARIS phase acceptance resolves a recorded DSH agent label using the model actually reported by its native session. The original agent declaration and older runs remain intact; missing model evidence stays unclassified and same-family review stays provisional. / ARIS 阶段验收用原生会话实际报告的模型补全 DSH 工具标签，保留原始执行工具与旧轮记录；缺少模型证据仍不判定独立性，同家族审核仍为暂定。
 - Reused DSH sessions retain unknown lifetime usage when historical events lack tokens. Round token deltas are exact only while the same historical unmetered event identities remain and reported totals do not regress; new gaps or regression persistently block further native dispatch under that round's token cap. Token coverage does not establish USD coverage. / 复用 DSH 会话时，历史事件缺少 tokens 的会话总用量仍为未知。仅在历史未计量事件身份集合不变、已报告累计值不倒退时，本轮 token 增量才可精确计算；新增缺项或倒退会在该轮 token 上限下持续阻断后续原生派发。token 计量完整不代表费用已知。
 - An in-flight native history read cannot replace newer controller scope, revocation or budget state, including before the first snapshot is available. / 尚未完成的原生历史读取不能覆盖较新的控制器范围、撤销或预算状态，包括尚无首次快照时。

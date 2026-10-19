@@ -16,7 +16,7 @@ async function native(args:string[]){
  await new Promise<void>((resolve,reject)=>{child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error||output||`ARIS exited ${code}`)));});
 }
 let serial=0;
-async function fixture(workflow:string){
+async function fixture(workflow:string,affectedStages?:string[]){
  const root=join(scratch,String(++serial));mkdirSync(root);writeFileSync(join(root,'projects.json'),'{"projects":[]}');
  const sessions:LiveSession[]=[],messages=new Map<string,any[]>();
  const runtime:ResearchRuntime={
@@ -36,6 +36,11 @@ async function fixture(workflow:string){
  await native(['start',project.root,'old-run','--phases','old','--executor','qwen']);
  await native(['set',project.root,'old-run','old','done','--artifact','report.md']);
  const old=readFileSync(join(project.root,'.aris/runs/old-run.json'),'utf8');
+ if(affectedStages){
+  const controlFile=join(project.root,'.bri/workbench.json'),control=JSON.parse(readFileSync(controlFile,'utf8'));
+  control.mode='pipeline';writeFileSync(controlFile,JSON.stringify(control));
+  workbench.recordContinuation(project.id,sessions.find(s=>s.provider==='dsh-pi')!.id,'Continue the affected fixture stages',affectedStages);
+ }
  await workbench.startCollaboration!(project.id,{task:'Validate only the selected fixture skill and its delivered artifacts',provider:'dsh-pi',model:'qwen'});
  const status=()=>workbench.collaborationStatus!(project.id)!;
  const finish=async(kind:'execute'|'review'|'sync',extra:Record<string,unknown>={},sessionId?:string)=>{
@@ -110,6 +115,47 @@ try{
   f.assertOld();
  }
  console.log('PASS workbench observed executor: DeepSeek/Codex accepted, GPT/Codex provisional, missing runtime observation unclassified despite configured model; original agent and old runs retained');
+ {
+  const affected=['experiment-bridge','auto-review-loop','summary'];
+  const f=await fixture('research-pipeline',affected),current=f.status(),actualId='actual-pipeline-continuation';
+  const mirrorId=`followup-${current.id}-r1`;
+  assert.ok(existsSync(join(f.project.root,`.aris/runs/${mirrorId}.json`)),'the controller follow-up exists before the executor creates its real ARIS run');
+  f.sessions.find(s=>s.id===current.executorSessionId)!.runtimeModel='ustc/deepseek-flash';
+  await native(['start',f.project.root,actualId,'--phases',affected.join(','),'--executor','dsh']);
+  for(const stage of ['experiment-bridge','summary'])await native(['set',f.project.root,actualId,stage,'done','--artifact','report.md']);
+  const progressFile=join(f.project.root,'.aris/progress.json');
+  writeFileSync(progressFile,JSON.stringify({run_id:actualId,workbench_iteration:true,summary:'Real executor-created fixture run'}));
+  await f.finish('execute',{arisRunId:actualId});
+  assert.equal(f.read(actualId).phases[0].status,'done','the execution receipt alone cannot accept real scientific stages');
+  await f.finish('review');
+  assert.equal(f.status().state,'accepted',f.status().callbackError);
+  const real=f.read(actualId);
+  assert.deepEqual(real.phases.map((phase:any)=>[phase.phase,phase.status]),affected.map(stage=>[stage,'accepted']),'the actual receipt run is accepted even when a controller follow-up already exists');
+  assert.ok(real.phases.every((phase:any)=>phase.executor_model==='ustc/deepseek-flash'&&phase.executor_family==='deepseek'&&phase.executor_agent==='dsh'));
+  const progress=JSON.parse(readFileSync(progressFile,'utf8')),focus=(await f.workbench.workspace(f.project.id)).focus;
+  assert.equal(progress.run_id,actualId,'the published briefing identifies the run actually accepted');
+  assert.equal(focus.pipeline_run_id,actualId);assert.equal(focus.completed,3);assert.equal(focus.total,3);
+  assert.deepEqual(focus.stages.map((stage:any)=>stage.status),['accepted','accepted','accepted'],'the reader cannot remain pinned to unaccepted real phases behind a reviewed briefing');
+  assert.notDeepEqual(f.read(mirrorId).phases.map((phase:any)=>phase.status),['accepted','accepted','accepted'],'the controller mirror is not substituted for actual phase acceptance');
+  f.assertOld();
+  console.log('PASS real pipeline continuation: current execution receipt run accepted across all three stages, reported DSH model retained, briefing/focus identify the same real run at 3/3, previous run unchanged');
+ }
+ {
+  const affected=['experiment-bridge','auto-review-loop','summary'],delivered=['experiment-bridge','summary'];
+  const f=await fixture('research-pipeline',affected),current=f.status(),actualId='partial-real-pipeline';
+  f.sessions.find(s=>s.id===current.executorSessionId)!.runtimeModel='ustc/deepseek-flash';
+  await native(['start',f.project.root,actualId,'--phases',delivered.join(','),'--executor','dsh']);
+  for(const stage of delivered)await native(['set',f.project.root,actualId,stage,'done','--artifact','report.md']);
+  await f.finish('execute',{arisRunId:actualId});await f.finish('review');
+  assert.equal(f.status().state,'accepted',f.status().callbackError);
+  assert.deepEqual(f.read(actualId).phases.map((phase:any)=>[phase.phase,phase.status]),delivered.map(stage=>[stage,'accepted']),'missing affected stages cannot replace a valid receipt run or manufacture new native phases');
+  const progress=JSON.parse(readFileSync(join(f.project.root,'.aris/progress.json'),'utf8')),focus=(await f.workbench.workspace(f.project.id)).focus;
+  assert.equal(progress.run_id,actualId);assert.equal(focus.pipeline_run_id,actualId);
+  assert.equal(focus.completed,2);assert.equal(focus.total,2);assert.ok(!focus.stages.some((stage:any)=>stage.id==='auto-review-loop'));
+  assert.notDeepEqual(f.read(`followup-${current.id}-r1`).phases.map((phase:any)=>phase.status),['accepted','accepted','accepted']);
+  f.assertOld();
+  console.log('PASS partial real pipeline: authoritative receipt run retained, only existing delivered phases accepted, absent stage not manufactured, previous run unchanged');
+ }
  {
   const f=await fixture('analyze-results');
   await native(['start',f.project.root,'current-skill','--phases','analysis','--executor','qwen']);
