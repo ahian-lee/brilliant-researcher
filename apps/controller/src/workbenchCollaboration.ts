@@ -111,7 +111,7 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
     const project = workbench.project(id);
     let loop = loops.get(id);
     if (!loop) {
-      loop = new CollaborationLoop({ projectRoot: project.root, operationTimeoutMs: 55_000,
+      loop = new CollaborationLoop({ projectRoot: project.root, operationTimeoutMs: 55_000, sendOperationTimeoutMs:420_000,
         port: {
           async inspect(sessionId) {
             const detail = await workbench.session(id, sessionId);

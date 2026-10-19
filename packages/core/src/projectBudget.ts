@@ -11,9 +11,28 @@ export interface NativeUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /** Sum of reported event totals; missing events remain explicitly unmetered. */
+  reportedTokens?: number;
+  unmeteredTokenEvents?: number;
+  unmeteredTokenEventIds?: string[];
   costUsd?: number | null;
   complete?: boolean;
   source?: string;
+}
+/** Historical missing usage cancels only while its coverage is unchanged. */
+export function tokenUsageDelta(current: {totalTokens?:number|null;reportedTokens?:number;unmeteredTokenEvents?:number;unmeteredTokenEventIds?:string[]}|undefined, baseline: {totalTokens?:number|null;reportedTokens?:number;unmeteredTokenEvents?:number;unmeteredTokenEventIds?:string[]}|undefined):number|null {
+  const valid=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
+  if(current?.unmeteredTokenEvents===undefined&&valid(current?.totalTokens))current={...current,reportedTokens:current.totalTokens,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]};
+  if(baseline?.unmeteredTokenEvents===undefined&&valid(baseline?.totalTokens))baseline={...baseline,reportedTokens:baseline.totalTokens,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]};
+  if(current?.unmeteredTokenEvents!==undefined||baseline?.unmeteredTokenEvents!==undefined){
+    if(!Number.isSafeInteger(current?.unmeteredTokenEvents)||!Number.isSafeInteger(baseline?.unmeteredTokenEvents)||!valid(current?.unmeteredTokenEvents)||current?.unmeteredTokenEvents!==baseline?.unmeteredTokenEvents)return null;
+    const ids=current?.unmeteredTokenEventIds,beforeIds=baseline?.unmeteredTokenEventIds;
+    if(!Array.isArray(ids)||!Array.isArray(beforeIds)||ids.length!==current.unmeteredTokenEvents||beforeIds.length!==baseline?.unmeteredTokenEvents||new Set(ids).size!==ids.length||new Set(beforeIds).size!==beforeIds.length||ids.some(id=>typeof id!=='string')||beforeIds.some(id=>typeof id!=='string')||ids.some(id=>!beforeIds.includes(id)))return null;
+    const now=current?.reportedTokens,before=baseline?.reportedTokens;
+    return valid(now)&&valid(before)&&now>=before?now-before:null;
+  }
+  const now=current?.totalTokens,before=baseline?.totalTokens;
+  return valid(now)&&valid(before)&&now>=before?now-before:null;
 }
 export interface Delegation {
   parentSessionId: string;

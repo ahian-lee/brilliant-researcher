@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import { existsSync,readdirSync,statSync } from 'node:fs';
+import { basename,dirname,join } from 'node:path';
 import type { NativeApproval, NativeDriver, NativeRecord, NativeSnapshot, NativeUpdate } from './types.ts';
 import type { RuntimeModel } from '../../../core/src/researchWorkbench.ts';
 
@@ -14,6 +16,24 @@ const iso = (value:any) => typeof value === 'number' ? new Date(value * 1000).to
 const askUserTool={type:'function',name:'bri_ask_user',description:'Ask the human one or more questions and wait for their answer. Available in Default mode as well as Plan mode.',inputSchema:{type:'object',properties:{questions:{type:'array',items:{type:'object',properties:{id:{type:'string'},header:{type:'string'},question:{type:'string'},options:{type:'array',items:{type:'object',properties:{label:{type:'string'},description:{type:'string'}},required:['label'],additionalProperties:false}}},required:['id','question'],additionalProperties:false}}},required:['questions'],additionalProperties:false}};
 
 export interface CodexOptions {executable:string;cliEntry?:string;home?:string;onUpdate:NativeUpdate;collaborationTools?:any[];onCollaborationTool?:(record:NativeRecord,name:string,args:any)=>Promise<unknown>;mcpServers?:(record:NativeRecord)=>Record<string,unknown>}
+/** Desktop updates replace version directories; keep an existing explicit selection. */
+export function resolveCodexExecutable(executable:string):string {
+  if(existsSync(executable)||basename(executable).toLowerCase()!=='codex.exe')return executable;
+  const version=dirname(executable),bin=dirname(version),app=dirname(bin);
+  if(!/^[a-f0-9]{12,64}$/i.test(basename(version))||basename(bin).toLowerCase()!=='bin'||basename(app).toLowerCase()!=='codex'||basename(dirname(app)).toLowerCase()!=='openai')return executable;
+  // The unversioned binary can survive upgrades as an older CLI, rather than
+  // being a launcher. Prefer the most recently installed version directory.
+  try {
+    const installed=readdirSync(bin,{withFileTypes:true}).filter(entry=>entry.isDirectory()&&/^[a-f0-9]{12,64}$/i.test(entry.name)).flatMap(entry=>{
+      const directory=join(bin,entry.name),candidate=join(directory,'codex.exe');
+      try {return statSync(candidate).isFile()?[{path:candidate,modified:statSync(directory).mtimeMs}]:[];}catch{return [];}
+    }).sort((a,b)=>b.modified-a.modified||a.path.localeCompare(b.path));
+    if(installed.length)return installed[0].path;
+  }catch {/* Retain the original error path if this installation is unreadable. */}
+  // Do not downgrade to a leftover unversioned CLI: older recorders can append
+  // incompatible records to a paginated thread. A missing install stays visible.
+  return executable;
+}
 /** Direct, persistent Codex app-server JSONL transport. No daemon or SDK dependency. */
 export class NativeCodexDriver implements NativeDriver {
   private options:CodexOptions;
@@ -43,7 +63,7 @@ export class NativeCodexDriver implements NativeDriver {
     if (this.closing) return Promise.reject(new Error('Codex driver is closed'));
     if (this.ready) return this.ready;
     this.ready=(async()=>{
-      const child=spawn(this.options.executable,[...(this.options.cliEntry?[this.options.cliEntry]:[]),'app-server','--stdio'],{
+      const child=spawn(resolveCodexExecutable(this.options.executable),[...(this.options.cliEntry?[this.options.cliEntry]:[]),'app-server'],{
         env:{...process.env,...(process.platform==='win32'&&!process.env.PATHEXT?{PATHEXT:'.COM;.EXE;.BAT;.CMD'}:{}),...(this.options.home ? {CODEX_HOME:this.options.home} : {})},
         stdio:['pipe','pipe','pipe'],windowsHide:true,
       });

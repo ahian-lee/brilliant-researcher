@@ -45,7 +45,7 @@
     "typescript": "5.9.3",
     "vite": "^6.0.7"
   },
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "An ARIS-based agent research workbench with native coding agents, independent review and continued iteration.",
   "license": "MIT",
   "author": "ahian-lee",

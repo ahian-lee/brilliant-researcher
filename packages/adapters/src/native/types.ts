@@ -9,6 +9,7 @@ export interface NativeDriver {
  models():Promise<RuntimeModel[]>;
  open(record:NativeRecord,previous?:NativeSnapshot):Promise<NativeSnapshot>;
  inspect(record:NativeRecord,previous?:NativeSnapshot):Promise<NativeSnapshot>;
+ prepare?(record:NativeRecord,assertCurrent:()=>void):Promise<void>;
  send(record:NativeRecord,message:string,assertDispatch?:()=>void):Promise<{accepted:boolean;status?:string}>;
  interrupt(record:NativeRecord):Promise<{ok:boolean;confirmed?:boolean;status?:string}>;
  configure(record:NativeRecord,input:{model?:string|null;thinkingOptionId?:string|null;permissionPreset?:'auto'|'danger-full-access';modeId?:'auto'|'full-access'}):Promise<{ok:boolean;session:NativeRecord;notice?:string}>;

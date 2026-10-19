@@ -6,8 +6,9 @@ import { DshBridge,safeDshError,type DshBridgeOptions,type DshMcpServer } from '
 export interface NativeDshOptions extends Omit<DshBridgeOptions,'mcpServers'> {
   onUpdate:NativeUpdate;
   mcpServers?:DshMcpServer[]|((record:NativeRecord)=>DshMcpServer[]);
+  contextCompactionThresholdTokens?:number;
 }
-interface State {record:NativeRecord;bridge:DshBridge;events:Map<number,any>;approvals:Map<string,NativeApproval>;streams:Map<string,{text:string;at:string}>;running:boolean;cancelled:boolean;lastTurnStart:number;finalSeen:boolean;failed?:boolean;}
+interface State {record:NativeRecord;bridge:DshBridge;events:Map<number,any>;approvals:Map<string,NativeApproval>;streams:Map<string,{text:string;at:string}>;running:boolean;maintenance:boolean;cancelled:boolean;lastTurnStart:number;finalSeen:boolean;failed?:boolean;}
 const advance=(previous:string|undefined,next:string)=>!previous||next>previous?next:previous;
 const iso=(time?:number)=>new Date(time??Date.now()).toISOString();
 const contentText=(content:any)=>Array.isArray(content)?content.filter((p:any)=>p.type==='text').map((p:any)=>p.text??'').join('\n'):typeof content==='string'?content:'';
@@ -42,18 +43,18 @@ export class NativeDshDriver implements NativeDriver {
     if(!record.cwd)throw new Error('DSH session requires cwd');
     const bridge=await DshBridge.launch(this.bridgeOptions(record));
     const nativeId=record.nativeId??randomUUID();
-    const state:State={record,bridge,events:new Map(),approvals:new Map(),streams:new Map(),running:false,cancelled:false,lastTurnStart:-1,finalSeen:false};
+    const state:State={record,bridge,events:new Map(),approvals:new Map(),streams:new Map(),running:false,maintenance:!!record.native?.compactionPending,cancelled:false,lastTurnStart:-1,finalSeen:false};
     this.states.set(record.id,state);
     const current=(p:any)=>p.sessionId===nativeId;
     bridge.on('session.event',p=>{if(current(p)){this.event(state,p.event);this.update(state);}});
     bridge.on('session.stream',p=>{if(current(p)&&this.stream(state,p.frame))this.update(state);});
-    bridge.on('session.status',p=>{if(!current(p))return;const record=state.record;state.running=p.status==='running';if(state.running){record.status=state.approvals.size?'waiting_input':'running';}else{
+    bridge.on('session.status',p=>{if(!current(p))return;const record=state.record;state.running=p.status==='running';if(state.maintenance){record.status=state.approvals.size?'waiting_input':'running';}else if(state.running){record.status=state.approvals.size?'waiting_input':'running';}else{
       const turnEnded=[...state.events.values()].some(e=>e.seq>state.lastTurnStart&&e.type==='turn/end');
       if(!record.error&&!state.cancelled&&!turnEnded&&!state.finalSeen&&state.lastTurnStart>=0){record.error=record.native?.lastAttemptError??'DSH became idle without a final response or a recorded turn end';}
       record.status=record.error?'error':state.cancelled?'interrupted':'idle';
     }this.update(state);});
     bridge.on('interaction.request',p=>{if(!current(p))return;state.approvals.set(p.requestId,this.approval(p));state.record.status='waiting_input';this.update(state);});
-    bridge.on('interaction.closed',p=>{if(!current(p))return;state.approvals.delete(p.requestId);state.record.status=state.approvals.size?'waiting_input':state.running?'running':state.record.error?'error':'idle';this.update(state);});
+    bridge.on('interaction.closed',p=>{if(!current(p))return;state.approvals.delete(p.requestId);state.record.status=state.approvals.size?'waiting_input':state.running||state.maintenance?'running':state.record.error?'error':'idle';this.update(state);});
     bridge.onFailure(error=>{const record=state.record;record.error=safeDshError(error);record.status='error';state.running=false;state.failed=true;state.approvals.clear();state.streams.clear();this.update(state);});
     try{
       const requestedModel=record.configuredModel??record.model;
@@ -64,27 +65,33 @@ export class NativeDshDriver implements NativeDriver {
       record.nativeId=opened.sessionId;record.native={...record.native,transport:'dsh-jsonl',profile:this.options.profile,home:this.options.home,modelSelection:opened.model};record.cwd=opened.cwd;
       delete record.error;for(const event of opened.events??[])this.event(state,event,true);this.applyConfig(record,opened);
       if(record.title)await bridge.request('session.rename',{sessionId:nativeId,title:record.title});
-      record.status=record.error?'error':'idle';this.update(state);return this.snapshot(state);
+      record.status=state.maintenance?'running':record.error?'error':'idle';this.update(state);return this.snapshot(state);
     }catch(error){this.states.delete(record.id);record.error=safeDshError(error);record.status='error';this.update(state);await bridge.close();throw error;}
   }
   private applyConfig(record:NativeRecord,configuration:any){
     if(configuration.model){const m=configuration.model;record.model=`${m.provider}/${m.model}`;record.configuredModel=record.model;record.thinkingOptionId=m.reasoningEffort??null;record.configuredThinkingOptionId=record.thinkingOptionId;record.native={...record.native,modelSelection:m};}
     if(configuration.permissionPreset){record.native={...record.native,permissionPreset:configuration.permissionPreset};record.permissionPreset=configuration.permissionPreset==='danger-full-access'?'danger-full-access':'auto';record.modeId=configuration.permissionPreset==='danger-full-access'?'full-access':'auto';}
   }
+  private maintenance(state:State,active:boolean){state.maintenance=active;state.record.native={...state.record.native,compactionPending:active};state.record.status=active?'running':state.running?'running':state.cancelled?'interrupted':state.record.error?'error':'idle';}
   private event(state:State,event:any,historical=false){
     if(event.type==='user/message'){const id=event.data?.id??event.data?.message?.id;for(const [seq,prior]of state.events)if(!Number.isInteger(seq)&&prior.data?.id===id)state.events.delete(seq);}
     state.events.set(event.seq,event);const record=state.record;const d=event.data??{};
-    if(event.type==='assistant/message'||event.type==='assistant/attempt'&&d.error){
+    const failedCompaction=event.type==='compaction/end'&&![...state.events.values()].some(prior=>prior.type==='compaction/summary'&&prior.data?.compactionId===d.compactionId);
+    if(event.type==='assistant/message'||event.type==='assistant/attempt'&&d.error||event.type==='compaction/summary'||failedCompaction){
       const usage=d.message?.usage??d.usage??{};
       const numeric=(...values:any[])=>values.find(value=>typeof value==='number'&&Number.isFinite(value)&&value>=0);
       const inputTokens=numeric(usage.inputTokens,usage.input),outputTokens=numeric(usage.outputTokens,usage.output);
       const totalTokens=numeric(usage.totalTokens,usage.total),costUsd=numeric(usage.costUsd,usage.cost?.total);
       // Saved native event identities make history replay and repeated delivery idempotent.
-      const ledger={...(record.native?.usageEntries??{})},key=event.type==='assistant/attempt'?'failed-attempt:'+String(d.attemptId??event.seq):String(d.message?.id??d.id??event.seq);ledger[key]={...ledger[key],...(inputTokens!==undefined?{inputTokens}:{}),...(outputTokens!==undefined?{outputTokens}:{}),...(totalTokens!==undefined?{totalTokens}:{}),...(costUsd!==undefined?{costUsd}:{})};
+      const ledger={...(record.native?.usageEntries??{})},key=event.type.startsWith('compaction/')?'compaction:'+String(event.seq):event.type==='assistant/attempt'?'failed-attempt:'+String(d.attemptId??event.seq):String(d.message?.id??d.id??event.seq);ledger[key]={...ledger[key],...(inputTokens!==undefined?{inputTokens}:{}),...(outputTokens!==undefined?{outputTokens}:{}),...(totalTokens!==undefined?{totalTokens}:{}),...(costUsd!==undefined?{costUsd}:{})};
       const values=Object.values(ledger) as Array<Record<string,number|undefined>>;
-      const sum=(key:string)=>values.every(value=>value[key]!==undefined)?values.reduce((total,value)=>total+value[key]!,0):undefined;
-      record.native={...record.native,usageEntries:ledger};record.usage={inputTokens:sum('inputTokens'),outputTokens:sum('outputTokens'),totalTokens:sum('totalTokens'),...(sum('costUsd')!==undefined?{costUsd:sum('costUsd')}:{}),complete:values.every(value=>['inputTokens','outputTokens','totalTokens'].every(key=>value[key]!==undefined)),source:'dsh:assistant-events'};
+      const valid=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
+      const sum=(key:string)=>values.every(value=>valid(value[key]))?values.reduce((total,value)=>total+value[key]!,0):undefined;
+      const reportedTokens=values.reduce((total,value)=>total+(valid(value.totalTokens)?value.totalTokens:0),0),unmeteredTokenEventIds=Object.keys(ledger).filter(id=>!valid(ledger[id].totalTokens)).sort(),unmeteredTokenEvents=unmeteredTokenEventIds.length;
+      record.native={...record.native,usageEntries:ledger};record.usage={inputTokens:sum('inputTokens'),outputTokens:sum('outputTokens'),totalTokens:sum('totalTokens'),reportedTokens,unmeteredTokenEvents,unmeteredTokenEventIds,...(sum('costUsd')!==undefined?{costUsd:sum('costUsd')}:{}),complete:values.every(value=>['inputTokens','outputTokens','totalTokens'].every(key=>valid(value[key]))),source:'dsh:assistant-events'};
     }
+    if(event.type==='compaction/start')this.maintenance(state,true);
+    if(event.type==='compaction/end')this.maintenance(state,false);
     if(event.type==='turn/start'){state.lastTurnStart=event.seq;state.finalSeen=false;state.cancelled=false;delete record.error;if(record.native)delete record.native.lastAttemptError;if(!historical){state.running=true;record.status='running';}}
     if(event.type==='assistant/message'){state.finalSeen=true;record.lastMessageAt=advance(record.lastMessageAt,iso(event.time));state.streams.clear();const source=d.message?.source;if(source?.provider&&source?.model)record.runtimeModel=`${source.provider}/${source.model}`;}
     if(event.type==='user/message')record.lastMessageAt=advance(record.lastMessageAt,iso(event.time));
@@ -113,6 +120,8 @@ export class NativeDshDriver implements NativeDriver {
     for(const event of [...state.events.values()].sort((a,b)=>a.seq-b.seq)){
       const d=event.data??{},at=iso(event.time),message=d.message??d;
       if(event.type==='assistant/message'||event.type==='user/message'){const text=contentText(message.content);if(text)messages.push({id:message.id??`dsh-${event.seq}`,role:event.type==='user/message'?'user':'assistant',text,at,final:event.type==='assistant/message'});}
+      if(event.type==='compaction/start'){const id='compaction-'+String(d.compactionId??event.seq);const item={id,tool:'compact',summary:'压缩会话上下文',status:'running',at};tools.set(id,item);activity.push(item);}
+      if(event.type==='compaction/end'){const tool=tools.get('compaction-'+String(d.compactionId));if(tool){tool.status=d.error?'failed':'completed';tool.error=d.error?safeDshError(JSON.stringify(d.error)):undefined;}}
       if(event.type==='tool/call'){
         const call=d.call??d;const id=call.id??d.callId??`dsh-tool-${event.seq}`;let args=call.arguments??call.args??call.input??{};if(typeof args==='string'){try{args=JSON.parse(args);}catch{args={input:args};}}const tool=call.name??d.toolName??'tool';
         const item={id,tool,summary:typeof args.command==='string'?args.command:typeof args.path==='string'?args.path:tool,status:'running',target:args.path,description:JSON.stringify(args).slice(0,4000),at};tools.set(id,item);activity.push(item);
@@ -124,21 +133,38 @@ export class NativeDshDriver implements NativeDriver {
       if(event.type==='turn/end')for(const tool of tools.values())if(tool.status==='running'){tool.status='failed';tool.error=d.reason?.error?.message?safeDshError(d.reason.error.message):`DSH turn ended: ${d.reason?.kind??'unknown'} before tool result`;}
     }
     for(const [id,entry]of state.streams)if(entry.text)messages.push({id:`stream-${id}`,role:'assistant',text:entry.text,at:entry.at,final:false});
-    return {session:state.record,messages,activity,approvals:[...state.approvals.values()],...(state.running?{activeTurn:{status:state.record.status}}:{})};
+    return {session:state.record,messages,activity,approvals:[...state.approvals.values()],...(state.running||state.maintenance?{activeTurn:{status:state.record.status,...(state.maintenance?{kind:'maintenance'}:{})}}:{})};
   }
   private update(state:State){state.record.updatedAt=iso();this.options.onUpdate(state.record,this.snapshot(state));}
   async inspect(record:NativeRecord):Promise<NativeSnapshot>{
     const state=this.states.get(record.id);if(state)return this.snapshot(state);if(!record.nativeId)return this.open(record);
     // Cold history reads do not acquire DSH's writer lease or change permissions.
     const bridge=await this.catalogBridge();const read=await bridge.request('session.read',{sessionId:record.nativeId});
-    const historical:State={record,bridge,events:new Map(),approvals:new Map(),streams:new Map(),running:false,cancelled:false,lastTurnStart:-1,finalSeen:false};
+    const historical:State={record,bridge,events:new Map(),approvals:new Map(),streams:new Map(),running:false,maintenance:!!record.native?.compactionPending,cancelled:false,lastTurnStart:-1,finalSeen:false};
     for(const event of read.events??[])this.event(historical,event,true);
     if(record.error)record.status='error';
     return this.snapshot(historical);
   }
+  async prepare(record:NativeRecord,assertCurrent:()=>void):Promise<void>{
+    assertCurrent();const state=this.states.get(record.id);
+    if(state?.maintenance)throw new Error('DSH compaction is still running');
+    if(!record.native?.collaborationScope?.active||!state||state.running||state.approvals.size||record.status!=='idle')return;
+    const threshold=this.options.contextCompactionThresholdTokens??200000;
+    if(!Number.isFinite(threshold)||threshold<=0)throw new Error('Invalid DSH context compaction threshold');
+    const events=[...state.events.values()].sort((a,b)=>b.seq-a.seq),latest=events.find(event=>event.type==='assistant/message'),summary=events.find(event=>event.type==='compaction/summary');
+    const usage=latest?.data?.message?.usage??latest?.data?.usage,total=usage?.totalTokens??usage?.total;
+    if(typeof total!=='number'||!Number.isFinite(total)||total<=threshold||latest.seq<=(summary?.seq??-1))return;
+    assertCurrent();const scope=record.native.collaborationScope;
+    const remaining=scope.maxDurationMs===undefined?300000:Math.max(1,scope.maxDurationMs-(Date.now()-(scope.createdAt??Date.now())));
+    this.maintenance(state,true);this.update(state);
+    let result:any;try{result=await state.bridge.request('session.command',{sessionId:record.nativeId,name:'compact',arguments:''},Math.min(300000,remaining));this.maintenance(state,false);}catch(error){if(!/timed out/.test(error instanceof Error?error.message:String(error)))this.maintenance(state,false);this.update(state);throw error;}
+    this.update(state);assertCurrent();
+    if(result.kind!=='success')throw new Error(safeDshError(result.text??'DSH compaction failed'));
+  }
   async send(record:NativeRecord,message:string,assertDispatch?:()=>void):Promise<{accepted:boolean;status?:string}>{
     if(!message.trim())throw new Error('DSH message is empty');await this.open(record);const state=this.states.get(record.id)!;
     // open may await the native writer; do not deliver a revoked action afterwards.
+    if(state.maintenance)throw new Error('DSH compaction is still running');
     assertDispatch?.();
     const method=state.running?'session.steer':'session.prompt';state.cancelled=false;delete record.error;
     state.running=true;record.status=state.approvals.size?'waiting_input':'running';this.update(state);
@@ -146,7 +172,7 @@ export class NativeDshDriver implements NativeDriver {
     if(![...state.events.values()].some(e=>e.type==='user/message'&&(e.data?.id===sent.messageId||e.data?.message?.id===sent.messageId))){const seq=Math.max(-1,...state.events.keys())+0.001;state.events.set(seq,{seq,type:'user/message',time:Date.now(),data:{id:sent.messageId,content:[{type:'text',text:message}]}});}
     this.update(state);return {accepted:true,status:record.status};
   }
-  async interrupt(record:NativeRecord){await this.open(record);const state=this.states.get(record.id)!;state.cancelled=true;await state.bridge.request('session.cancel',{sessionId:record.nativeId});this.update(state);return {ok:true,confirmed:!state.running,status:record.status};}
+  async interrupt(record:NativeRecord){await this.open(record);const state=this.states.get(record.id)!;state.cancelled=true;await state.bridge.request('session.cancel',{sessionId:record.nativeId});this.update(state);return {ok:true,confirmed:!state.running&&!state.maintenance,status:record.status};}
   async configure(record:NativeRecord,input:{model?:string|null;thinkingOptionId?:string|null;permissionPreset?:'auto'|'danger-full-access';modeId?:'auto'|'full-access'}){
     await this.open(record);const state=this.states.get(record.id)!;const params:any={sessionId:record.nativeId};
     if(input.model!==undefined||input.thinkingOptionId!==undefined)params.model=this.selection(state.bridge,input.model??record.model,input.thinkingOptionId,record.native?.modelSelection);

@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { briefingExample, readReaderBriefing, readerBriefingInstruction, type ReaderBriefing } from './readerBriefing.ts';
+import {tokenUsageDelta} from './projectBudget.ts';
 
-export interface CollaborationUsage { totalTokens?:number|null; costUsd?:number|null; complete?:boolean; source?:string; }
+export interface CollaborationUsage { totalTokens?:number|null; reportedTokens?:number;unmeteredTokenEvents?:number;unmeteredTokenEventIds?:string[];costUsd?:number|null; complete?:boolean; source?:string; }
 export interface CollaborationBudget { maxDurationMs?:number; maxRevisions?:number; maxTokens?:number; maxCostUsd?:number; maxConcurrentAgents?:number; maxSubagents?:number; }
 export interface CollaborationScope {
   collaborationId:string;actionId:string;revision:number;task:string;createdAt:number;active:boolean;
@@ -71,6 +72,7 @@ export interface CollaborationRun {
   maxRevisions: number; maxDurationMs: number; createdAt: number; updatedAt: number;
   maxTokens?:number;maxCostUsd?:number;maxConcurrentAgents?:number;maxSubagents?:number;
   usage?:CollaborationUsage;usageBaseline?:Record<string,CollaborationUsage>;
+  tokenCoverageLost?:boolean;
   arisRunIds?:Record<string,string>;
   directions: Array<{ revision: number; text: string; at: number }>;
   actions: CollaborationAction[]; events: CollaborationEvent[];
@@ -92,7 +94,7 @@ export interface CollaborationStart extends CollaborationBudget {
 }
 export interface CollaborationLoopOptions {
   projectRoot: string; port: CollaborationPort; now?: () => number;
-  operationTimeoutMs?: number; actionTimeoutMs?: number;
+  operationTimeoutMs?: number; sendOperationTimeoutMs?: number; actionTimeoutMs?: number;
   /** Durable events are the source of truth. A failed callback is recorded, never replays a send. */
   onEvent?: (event: CollaborationEvent, run: CollaborationRun) => void | Promise<void>;
 }
@@ -140,7 +142,7 @@ export class CollaborationLoop {
     this.now = options.now ?? Date.now;
     this.ioTimeout = options.operationTimeoutMs ?? 15_000;
     this.actionTimeout = options.actionTimeoutMs ?? 30 * 60_000;
-    if (!(this.ioTimeout > 0) || !(this.actionTimeout > 0)) throw new Error('协作超时必须为正数');
+    if (!(this.ioTimeout > 0) || !(this.actionTimeout > 0) || options.sendOperationTimeoutMs!==undefined&&(!Number.isFinite(options.sendOperationTimeoutMs)||options.sendOperationTimeoutMs<=0)) throw new Error('协作超时必须为正数');
     this.checkStore();
     if (existsSync(this.file)) {
       const saved = JSON.parse(readFileSync(this.file, 'utf8'));
@@ -221,9 +223,9 @@ export class CollaborationLoop {
       this.touch(run);
     }
   }
-  private async io<T>(operation: Promise<T>): Promise<T> {
+  private async io<T>(operation: Promise<T>, timeoutMs=this.ioTimeout): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('执行端响应超时，操作结果不明')), this.ioTimeout); })]); }
+    try { return await Promise.race([operation, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('执行端响应超时，操作结果不明')), timeoutMs); })]); }
     finally { if (timer) clearTimeout(timer); }
   }
   async start(input: CollaborationStart): Promise<CollaborationRun> {
@@ -290,11 +292,13 @@ export class CollaborationLoop {
     const previous=JSON.stringify(run.usage);
     const roots=new Set([run.executorSessionId,run.reviewerSessionId]);
     const values=[...inspections].filter(([id])=>roots.has(id)).map(([id,row])=>({usage:row.usage,baseline:run.usageBaseline?.[id]}));
-    values.push(...children.map(child=>({usage:child.usage,baseline:{totalTokens:0,costUsd:0}})));
+    values.push(...children.map(child=>({usage:child.usage,baseline:{totalTokens:0,costUsd:0,...(child.usage?.unmeteredTokenEvents!==undefined?{reportedTokens:0,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]}:{})}})));
     const sum=(key:'totalTokens'|'costUsd')=>{
-      let total=0;for(const value of values){const current=value.usage?.[key],before=value.baseline?.[key];if(typeof current!=='number'||!Number.isFinite(current)||current<0||typeof before!=='number'||!Number.isFinite(before)||before<0||current<before)return null;total+=current-before;}return total;
+      let total=0;for(const value of values){if(key==='totalTokens'){const delta=tokenUsageDelta(value.usage,value.baseline);if(delta===null)return null;total+=delta;continue;}const current=value.usage?.[key],before=value.baseline?.[key];if(typeof current!=='number'||!Number.isFinite(current)||current<0||typeof before!=='number'||!Number.isFinite(before)||before<0||current<before)return null;total+=current-before;}return Number.isFinite(total)?total:null;
     };
-    run.usage={totalTokens:sum('totalTokens'),costUsd:sum('costUsd'),source:'native-session-delta'};
+    const tokens=sum('totalTokens');
+    if(typeof tokens==='number'&&typeof run.usage?.totalTokens==='number'&&tokens<run.usage.totalTokens)run.tokenCoverageLost=true;
+    run.usage={totalTokens:run.tokenCoverageLost?null:tokens,costUsd:sum('costUsd'),source:'native-session-delta'};
     run.usage.complete=run.usage.totalTokens!==null&&run.usage.costUsd!==null;
     if(previous!==JSON.stringify(run.usage))this.touch(run);
   }
@@ -544,7 +548,7 @@ export class CollaborationLoop {
       }, error => {
         action.transportPending = false; action.sendUncertain = true; this.touch(run); throw error;
       });
-      const result = await this.io(operation);
+      const result = await this.io(operation,this.options.sendOperationTimeoutMs??this.ioTimeout);
       const latest=this.current(),observed=latest?.actions.find(row=>row.id===action.id);
       if (observed && observed.status !== 'obsolete') observed.status = result.accepted ? 'sent' : 'rejected';
       if (!result.accepted && latest?.id===run.id && action.revision === latest.revision && latest.state !== 'stopping') {

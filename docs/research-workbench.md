@@ -30,6 +30,8 @@ Blank fields clear an explicit setting. Zero tokens or USD disallows subsequent 
 
 Run usage comes from native session deltas, with parent and child contributions handled by the backend. Session cards show their own reported usage; do not add these cards to the run total. Missing tokens or cost means **not reported**, not zero; partial reports remain partial. If a configured limit cannot be checked because metering is missing, the system stops new managed actions and shows the reason. Checks occur at dispatch and observation boundaries: provider latency and a model turn already in flight can exceed a reported threshold, so a BRI budget is not a provider-side prepaid spending cap. Direct sends also receive a budget scope; they do not gain automatic review or repair by doing so.
 
+Since v0.2.1, a reused DSH session can retain unknown lifetime tokens while still providing an exact token delta for a new round. This requires the historical unmetered event identities to remain unchanged and reported token totals to stay nondecreasing. A new missing event, changed coverage or a regression makes the round's token coverage unreliable and persistently blocks further native dispatch under its token cap; later reports do not silently clear that block. Historical missing usage is never counted as zero or rewritten as complete. USD remains unknown unless its own reports establish the cost delta.
+
 ## Execute, review, and change direction
 
 Automatic collaboration follows DSH execution → independent Codex review → repair according to the findings. A delivery or message acknowledgement only confirms receipt. Check the independent review to determine whether the artifacts passed. The backend can continue after the browser is closed, provided its processes remain running.
@@ -42,11 +44,17 @@ When a decision is needed, the blocked-work and pending-decision sections show t
 
 Recovery is finite. A confirmed idle session without a usable result can be asked to diagnose and continue at most twice; a malformed final reply has a separate allowance of at most two format-only restatements, without redoing implementation. Uncertain sends are observed instead of blindly replayed. A genuine blocked result stops with its reason and preserves the current work. Persistent failures become visible attention states rather than an unlimited retry loop.
 
+Delayed native history reads preserve newer controller scope, revocations and budget state, even before a first snapshot exists. If a managed send fails before native submission, it reports an explicit rejection with its reason. If submission may already have occurred and its acknowledgement is lost, the result remains unknown and the request is not resent.
+
+Before sending a new managed task prompt, BRI can compact an idle DSH session when its latest assistant call reports more than 200,000 `totalTokens` and no later native summary covers that call. This uses DSH's native `compact` command and retains the session identity and journal. Set `dsh.contextCompactionThresholdTokens` in `var/native-runtime.local.json` to a positive token threshold if needed. Compaction calls the configured model and may incur charges; summary usage joins the usage ledger, and a failed compaction without a summary remains unmetered. BRI rechecks scope and budget after maintenance and before the task prompt. The implementation is covered by software checks; effectiveness on a real long session remains to be verified.
+
 Model and reasoning settings can be changed once the sessions are idle. Pause collaboration first if execution, audit planning, or review is in progress.
 
 ## Continue iterating or redo work
 
 The overview's continue/redo action and a workflow stage's redo-from-here action open the existing project conversation with Codex audit and planning enabled by default. Send the prefilled iteration request or add the changes you want; you do not need to write the complete plan yourself.
+
+Continuing after a pause, fault or exhausted budget starts a new round with the same executor and reviewer conversations. The previous round keeps its timestamps, usage and receipts; the new round uses the project's saved budget and starts its own elapsed time. A send whose outcome is still unknown must be reconciled before another round can replace it.
 
 Codex first inspects existing artifacts, then provides an audit, recommendations, execution steps, and acceptance criteria. These appear in the overview. A plan within the authorized scope is passed to DSH for execution, followed by independent Codex review and any needed repairs. The cycle waits for your response when a scope, cost, or direction decision is required.
 

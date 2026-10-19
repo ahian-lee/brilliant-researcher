@@ -39,9 +39,11 @@ async function fixture(provider:'codex'|'dsh-pi',body:(f:any)=>Promise<void>){
  finally{releasePreparation.resolve();releaseReceipt.resolve();await runtime.close();rmSync(root,{recursive:true,force:true});}
 }
 
+const rejectedBeforeWrite=async(promise:Promise<{accepted:boolean;error?:string}>,pattern:RegExp)=>{const result=await promise;assert.equal(result.accepted,false);assert.match(result.error??'',pattern);};
+
 for(const provider of ['codex','dsh-pi'] as const){
  await fixture(provider,async({runtime,scope,calls,prepared,releasePreparation})=>{
-  const sending=runtime.sendMessage('parent','old direction',{collaboration:scope}),rejected=assert.rejects(sending,/失效/);
+  const sending=runtime.sendMessage('parent','old direction',{collaboration:scope}),rejected=rejectedBeforeWrite(sending,/失效/);
   await prepared.promise;
   assert.equal((await runtime.listSessions())[0].status,'starting');assert.equal((await runtime.inspectSession('parent')).session.status,'starting');
   await assert.rejects(runtime.sendMessage('parent','overlapping input',{collaboration:{...scope,actionId:'unreserved'}}),/仍在发送/);
@@ -51,13 +53,13 @@ for(const provider of ['codex','dsh-pi'] as const){
   assert.equal(calls.length,0,'a real driver must reject the old action after its own asynchronous preparation, before any protocol write');
  });
  await fixture(provider,async({runtime,scope,calls,prepared,releasePreparation})=>{
-  const sending=runtime.sendMessage('parent','interrupt before write',{collaboration:scope}),rejected=assert.rejects(sending,/中断/);await prepared.promise;
+  const sending=runtime.sendMessage('parent','interrupt before write',{collaboration:scope}),rejected=rejectedBeforeWrite(sending,/中断/);await prepared.promise;
   const interrupted=await runtime.interruptSession('parent');assert.equal(interrupted.confirmed,false);assert.equal(interrupted.status,'starting');
   releasePreparation.resolve();await rejected;
   assert.equal(calls.length,0);assert.equal((await runtime.inspectSession('parent')).session.status,'idle','cancelled preparation must never create a native running turn');
  });
  await fixture(provider,async({runtime,record,scope,calls,prepared,releasePreparation,update,snapshot})=>{
-  const sending=runtime.sendMessage('parent','budget changed while preparing',{collaboration:scope}),rejected=assert.rejects(sending,/额度/);await prepared.promise;
+  const sending=runtime.sendMessage('parent','budget changed while preparing',{collaboration:scope}),rejected=rejectedBeforeWrite(sending,/额度/);await prepared.promise;
   record.usage={inputTokens:70,outputTokens:31,totalTokens:101,complete:true};update(record,snapshot());
   releasePreparation.resolve();await rejected;assert.equal(calls.length,0,'the protocol boundary rechecks current native billing, not only the initial budget snapshot');
  });

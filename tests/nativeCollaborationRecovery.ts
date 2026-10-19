@@ -13,11 +13,13 @@ class MemoryDriver implements NativeDriver{
  async models(){return [];}
  async open(record:NativeRecord){record.nativeId??='preserved-native-'+record.id;record.status='idle';return this.snapshot(record);}
  async inspect(record:NativeRecord){return this.snapshot(record);}
- async send(record:NativeRecord,message:string){const row=this.snapshot(record);this.sends.push({id:record.id,scope:structuredClone(record.native?.collaborationScope),message});row.messages.push({id:'user-'+(++serial),role:'user',text:message});record.status='running';row.activeTurn={id:'turn-'+serial};this.update(record,row);if(this.loseNext){this.loseNext=false;throw Error('accepted, receipt lost');}return {accepted:true};}
+ async send(record:NativeRecord,message:string,assertDispatch?:()=>void){assertDispatch?.();const row=this.snapshot(record);this.sends.push({id:record.id,scope:structuredClone(record.native?.collaborationScope),message});row.messages.push({id:'user-'+(++serial),role:'user',text:message});record.status='running';row.activeTurn={id:'turn-'+serial};this.update(record,row);if(this.loseNext){this.loseNext=false;throw Error('accepted, receipt lost');}return {accepted:true};}
  finish(id:string,text?:string){const row=this.rows.get(id)!;row.session.status='idle';delete row.activeTurn;if(text)row.messages.push({id:'reply-'+(++serial),role:'assistant',text,final:true});this.update(row.session,row);}
  async interrupt(record:NativeRecord){if(this.interruptAckOnly)return {ok:true,confirmed:false};const row=this.snapshot(record);record.status='interrupted';delete row.activeTurn;this.update(record,row);return {ok:true,confirmed:true};}
  async configure(record:NativeRecord){return {ok:true,session:record};}async approve(){return {ok:true};}async answer(){return {ok:true};}async close(){}
 }
+const rejectedBeforeWrite=async(promise:Promise<{accepted:boolean;error?:string}>,pattern:RegExp)=>{const result=await promise;assert.equal(result.accepted,false);assert.match(result.error??'',pattern);};
+
 async function scenario(name:string,body:(f:any)=>Promise<void>){
  const project=join(root,name);mkdirSync(project);writeFileSync(join(project,'artifact.txt'),'measured artifact');let driver!:MemoryDriver,now=1000;
  const runtime=new NativeRuntime(join(project,'sessions'),update=>({codex:driver=new MemoryDriver(update)}));
@@ -41,7 +43,7 @@ try{
  await scenario('format',async({runtime,createAgent,sendAgentPrompt,driver,loop,start,current,action,execution,time})=>{
   await start();const originalScope=driver.sends[0].scope;const child=await createAgent('executor',{provider:'codex',prompt:'measure a part'});driver.finish(child.agent.id,'part measured');driver.finish('executor','Completed the artifact, but this is not the requested JSON.');time(47001);await loop.tick();
   assert.equal(driver.sends.length,3,'initial execution, child prompt, and one format restatement');assert.equal(action().status,'sent','real NativeRuntime must accept the limited recovery scope');assert.equal(action().sendUncertain,false);assert.equal(driver.sends.at(-1).scope.recoveryMode,'format');assert.equal(driver.sends.at(-1).scope.recoveryAttempt,1);
-  await assert.rejects(createAgent('executor',{prompt:'format cannot launch work'}),/数量/);await assert.rejects(sendAgentPrompt('executor',child.agent.id,'wake old child'),/失效/);await assert.rejects(runtime.sendMessage('executor','ordinary late delivery',{collaboration:originalScope}),/撤销/);
+  await assert.rejects(createAgent('executor',{prompt:'format cannot launch work'}),/数量/);await assert.rejects(sendAgentPrompt('executor',child.agent.id,'wake old child'),/失效/);const beforeLate=driver.sends.length;await rejectedBeforeWrite(runtime.sendMessage('executor','ordinary late delivery',{collaboration:originalScope}),/撤销/);assert.equal(driver.sends.length,beforeLate,'revoked scope rejection writes no new prompt');
   driver.finish('executor',execution());await loop.tick();assert.equal(current().state,'reviewing');
   await assert.rejects(createAgent('reviewer',{prompt:'review must share the run subagent quota'}),/数量/);
   const review=action('reviewer');driver.finish('reviewer',JSON.stringify({actionId:review.id,revision:review.revision,kind:'review',verdict:'revise',feedback:'check one more measurement',checks:['read artifact']}));time(48000);await loop.tick();assert.equal(current().state,'executing');await assert.rejects(createAgent('executor',{prompt:'repair must share the run subagent quota'}),/数量/);
@@ -50,7 +52,7 @@ try{
  await scenario('continue',async({runtime,driver,loop,start,action,time})=>{
   await start();driver.finish('executor');time(47001);await loop.tick();assert.equal(action().status,'sent');assert.equal(driver.sends.at(-1).scope.recoveryMode,'continue');assert.equal(driver.sends.at(-1).scope.recoveryAttempt,1);
   driver.finish('executor');time(94002);await loop.tick();assert.equal(action().status,'sent');assert.equal(driver.sends.at(-1).scope.recoveryAttempt,2);const stoppedScope=driver.sends.at(-1).scope;
-  await loop.pause();await loop.tick();await assert.rejects(runtime.sendMessage('executor','late limited recovery',{collaboration:stoppedScope}),/撤销/);
+  await loop.pause();await loop.tick();const beforeLate=driver.sends.length;await rejectedBeforeWrite(runtime.sendMessage('executor','late limited recovery',{collaboration:stoppedScope}),/撤销/);assert.equal(driver.sends.length,beforeLate,'paused recovery rejection writes no new prompt');
  });
  await scenario('new-session-budget',async({runtime,driver,loop,project})=>{
   assert.equal(runtime.records.get('executor')!.usage,undefined,'imported historical sessions must not acquire invented zero usage');
@@ -60,7 +62,7 @@ try{
  });
  await scenario('direct',async({runtime,driver,project,createAgent})=>{
   const empty=await runtime.createSession({cwd:project,provider:'codex'});const direct=(actionId:string)=>({collaborationId:'direct-'+actionId,actionId,revision:1,task:'bounded direct work',createdAt:Date.now(),active:true,maxConcurrentAgents:3,maxSubagents:2});
-  const count=driver.sends.length;await assert.rejects(runtime.sendMessage(empty.id,'must not send',{collaboration:{...direct('zero'),maxTokens:0}}),/额度/);assert.equal(driver.sends.length,count,'zero token budget is checked before any native model send');
+  const count=driver.sends.length;await rejectedBeforeWrite(runtime.sendMessage(empty.id,'must not send',{collaboration:{...direct('zero'),maxTokens:0}}),/额度/);assert.equal(driver.sends.length,count,'zero token budget is checked before any native model send');
   const timed=await runtime.createSession({cwd:project,provider:'codex'});await runtime.sendMessage(timed.id,'bounded task',{collaboration:{...direct('timed'),maxDurationMs:100}});const child=await createAgent(timed.id,{prompt:'bounded child'});
   for(let n=0;n<100&&!runtime.records.get(timed.id)!.native?.directBudgetStop?.confirmed;n++)await new Promise(r=>setTimeout(r,10));
   assert.equal(runtime.records.get(timed.id)!.status,'interrupted');assert.equal(runtime.records.get(child.agent.id)!.status,'interrupted');assert.equal(runtime.records.get(timed.id)!.native!.directBudgetStop.confirmed,true);

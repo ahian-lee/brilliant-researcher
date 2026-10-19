@@ -39,6 +39,15 @@ function fixture(budget:CollaborationBudget={}){
 }
 const blocked={actionId:'a',revision:1,kind:'execute',outcome:'blocked',summary:'Dataset unavailable',reason:'Required dataset does not exist'};
 try{
+  {
+    const f=fixture(),send=f.port.send.bind(f.port);
+    f.port.send=async(...args:Parameters<Port['send']>)=>{await new Promise(resolve=>setTimeout(resolve,60));return send(...args);};
+    const loop=new CollaborationLoop({...f.config,sendOperationTimeoutMs:500});
+    await loop.start({task:'Fixture with bounded native maintenance',executorSessionId:'executor',reviewerSessionId:'reviewer'});
+    assert.equal(loop.status()!.actions[0].status,'sent','native preparation may outlast the read timeout without becoming an uncertain prompt');
+    assert.equal(f.port.sent.length,1);
+    f.port.success();await loop.tick();assert.equal(f.port.sent.length,2,'normal review dispatch continues after preparation');
+  }
   assert.equal(parseCollaborationReply(JSON.stringify(blocked))?.kind,'execute');
   assert.equal(parseCollaborationReply(JSON.stringify({...blocked,reason:''})),null);
   {
@@ -75,6 +84,33 @@ try{
     f.port.rows.get('executor')!.usage={totalTokens:110,costUsd:1.2};f.port.success();await f.loop.tick();
     assert.equal(f.state().state,'budget_exhausted');assert.equal(f.port.sent.length,1,'known exhausted usage cannot dispatch review');
     assert.equal(f.state().usage?.totalTokens,10);assert.ok(Math.abs(f.state().usage!.costUsd!-.2)<1e-8,'historical session costs are subtracted');
+  }
+  {
+    const historical={reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap'],complete:false};
+    const f=fixture({maxTokens:20});f.port.rows.get('executor')!.usage={...historical};await f.start();
+    assert.equal(f.port.sent.length,1,'unchanged historical unknown usage cancels at round start');assert.equal(f.state().usage?.totalTokens,0);
+    f.port.rows.get('executor')!.usage={...historical,reportedTokens:107};await f.loop.tick();assert.equal(f.state().usage?.totalTokens,7);
+    f.port.rows.get('executor')!.usage={...historical,reportedTokens:107,unmeteredTokenEvents:2,unmeteredTokenEventIds:['old-gap','new-gap']};f.port.success();await f.loop.tick();
+    assert.equal(f.state().state,'needs_attention');assert.equal(f.port.sent.length,1,'new unknown usage blocks review');
+  }
+  {
+    const f=fixture({maxTokens:20});const historical={reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap']};f.port.rows.get('executor')!.usage=historical;await f.start();
+    f.port.rows.get('executor')!.usage={...historical,reportedTokens:110};await f.loop.tick();assert.equal(f.state().usage?.totalTokens,10);
+    f.port.rows.get('executor')!.usage={...historical,reportedTokens:105};f.port.success();await f.loop.tick();
+    assert.equal(f.state().state,'needs_attention');assert.equal(f.state().usage?.totalTokens,null);assert.equal(f.port.sent.length,1);
+    f.port.rows.get('executor')!.usage={...historical,reportedTokens:110};const restored=new CollaborationLoop(f.config);
+    assert.equal(restored.status()!.tokenCoverageLost,true,'decreasing usage remains unknown across restart');
+    await restored.steer('Continue only if the same round is metered');await restored.tick();await restored.tick();
+    assert.equal(restored.status()!.usage?.totalTokens,null);assert.equal(f.port.sent.length,1,'steering does not clear uncertain coverage or authorize another send');
+  }
+  for(const changed of [
+    {reportedTokens:105,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]},
+    {reportedTokens:105,unmeteredTokenEvents:1,unmeteredTokenEventIds:['new-gap']},
+    {reportedTokens:99,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap']},
+  ]){
+    const f=fixture({maxTokens:20});f.port.rows.get('executor')!.usage={reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap']};await f.start();
+    f.port.rows.get('executor')!.usage=changed;f.port.success();const restored=new CollaborationLoop(f.config);await restored.tick();
+    assert.equal(restored.status()!.state,'needs_attention');assert.equal(f.port.sent.length,1,'backfill, replacement gaps and decreasing sums fail closed after restart');
   }
   {
     const f=fixture({maxCostUsd:.1});f.port.rows.get('executor')!.usage={totalTokens:100,costUsd:null};await f.start();

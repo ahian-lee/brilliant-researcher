@@ -1,5 +1,15 @@
 # Changelog / 更新记录
 
+## 0.2.1 — 2026-10-20
+
+- Reused DSH sessions retain unknown lifetime usage when historical events lack tokens. Round token deltas are exact only while the same historical unmetered event identities remain and reported totals do not regress; new gaps or regression persistently block further native dispatch under that round's token cap. Token coverage does not establish USD coverage. / 复用 DSH 会话时，历史事件缺少 tokens 的会话总用量仍为未知。仅在历史未计量事件身份集合不变、已报告累计值不倒退时，本轮 token 增量才可精确计算；新增缺项或倒退会在该轮 token 上限下持续阻断后续原生派发。token 计量完整不代表费用已知。
+- An in-flight native history read cannot replace newer controller scope, revocation or budget state, including before the first snapshot is available. / 尚未完成的原生历史读取不能覆盖较新的控制器范围、撤销或预算状态，包括尚无首次快照时。
+- A managed send failing before native submission returns an explicit rejection with its reason. A lost acknowledgement after submission remains unknown and is not replayed. / 受管理发送在原生提交前失败时明确返回拒绝及原因；提交后丢失回执仍保留未知，不重发。
+- Continuing a paused or faulted collaboration starts a new round on the original conversations, preserving old usage, timestamps and receipts. Days offline no longer spend the next round's duration before it starts; unresolved delivery still prevents replacement dispatch. / 暂停或故障后继续协作时，复用原会话开启新轮，保留旧用量、时间和回执；离线数天不会提前耗尽新轮时间，发送结果不明仍阻止替换派发。
+- Codex launches with the default app-server stdio transport. A removed Desktop-managed executable can resolve to a remaining versioned installation, without downgrading to a leftover unversioned CLI; existing explicit and custom selections are retained. / Codex 使用 app-server 默认 stdio 传输；Desktop 升级移除已配置程序后，查找仍存在的版本目录，不降级到遗留的非版本 CLI，保留现存显式路径和自定义选择。
+- Before a new managed prompt, an idle DSH session compacts when its latest assistant call reports more than 200,000 total tokens and no later native summary covers it. Native session identity and journal are retained. Compaction uses the configured model, may incur charges, and its reported usage is counted; failed compaction without a summary remains unmetered. Scope and budget are checked again before the task prompt. Software checks cover the implementation; live long-session effectiveness is not yet established. / 受管理的新任务 prompt 发送前，空闲 DSH 会话在最新 assistant 调用报告超过 200,000 total tokens、且未被后续原生摘要覆盖时压缩上下文，保留原生会话身份与 journal。压缩调用已配置模型，可能付费，报告用量纳入计量；失败且无摘要时保持未计量。任务 prompt 前再次检查范围与预算。实现已由软件检查覆盖，长会话真实效果尚待验证。
+- Workbench regression checks cover these budget, history-read and dispatch boundaries. This patch does not establish acceptance of an ongoing research iteration or validation of every ARIS workflow. / 工作台回归检查覆盖上述预算、历史读取和派发边界。本补丁不代表进行中的科研迭代已通过验收，也不代表全部 ARIS 流程已验证。
+
 ## 0.2.0 — 2026-10-15
 
 - Native parent/child orchestration records ownership and action/revision, bounds child creation and concurrency, and waits for child shutdown before review or a new direction. / 原生父子协调记录归属及动作/修订，限制子会话与并发，在审核或新方向前确认子会话停止。

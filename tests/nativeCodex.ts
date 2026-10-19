@@ -1,10 +1,27 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,readFileSync,rmSync,utimesSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {NativeRuntime} from '../packages/adapters/src/nativeRuntime.ts';
-import { NativeCodexDriver } from '../packages/adapters/src/native/codexDriver.ts';
+import { NativeCodexDriver,resolveCodexExecutable } from '../packages/adapters/src/native/codexDriver.ts';
 import type { NativeRecord } from '../packages/adapters/src/native/types.ts';
+const executableRoot=mkdtempSync(join(tmpdir(),'bri-codex-update-'));
+try {
+ const bin=join(executableRoot,'OpenAI','Codex','bin'),old=join(bin,'0123456789abcdef','codex.exe'),stable=join(bin,'codex.exe');
+ mkdirSync(join(bin,'0123456789abcdef'),{recursive:true});writeFileSync(stable,'stable launcher fixture');
+ const currentDir=join(bin,'fedcba9876543210'),current=join(currentDir,'codex.exe'),olderDir=join(bin,'1111222233334444'),older=join(olderDir,'codex.exe');
+ mkdirSync(olderDir);writeFileSync(older,'previous CLI');utimesSync(olderDir,new Date('2025-01-01'),new Date('2025-01-01'));
+ mkdirSync(currentDir);writeFileSync(current,'current CLI');utimesSync(currentDir,new Date('2026-01-01'),new Date('2026-01-01'));
+ assert.equal(resolveCodexExecutable(old),current,'prefer the latest managed installation over a stale unversioned CLI');
+ writeFileSync(old,'explicit installed selection');assert.equal(resolveCodexExecutable(old),old,'keep a present explicit executable');
+ rmSync(old);rmSync(currentDir,{recursive:true});assert.equal(resolveCodexExecutable(old),older,'another installed managed version remains usable');
+ rmSync(olderDir,{recursive:true});assert.equal(resolveCodexExecutable(old),old,'do not downgrade to a leftover unversioned CLI when no managed installation remains');
+ rmSync(stable);assert.equal(resolveCodexExecutable(old),old,'keep the missing path when no installed executable exists');
+ const custom=join(executableRoot,'Custom','Codex','bin'),missing=join(custom,'0123456789abcdef','codex.exe');
+ mkdirSync(custom,{recursive:true});writeFileSync(join(custom,'codex.exe'),'unrelated fixture');
+ assert.equal(resolveCodexExecutable(missing),missing,'do not silently replace a missing custom executable');
+} finally {rmSync(executableRoot,{recursive:true,force:true});}
+console.log('PASS Codex Desktop update recovery: latest installed managed CLI preferred over stale unversioned binary, existing/custom selections preserved');
 const updates:any[]=[];
 const driver=new NativeCodexDriver({executable:'unused',onUpdate:(record,snapshot)=>updates.push({status:record.status,snapshot})});
 const client=driver as any;

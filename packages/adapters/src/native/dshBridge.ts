@@ -55,7 +55,7 @@ export class DshBridge {
         if(client.ready){resolve();return;}
         const release=client.on('bridge.ready',()=>finish());
         const fail=client.onFailure(error=>finish(error));
-        const timer=setTimeout(()=>finish(new Error('DSH bridge startup timed out')),options.startupTimeoutMs??30000);
+        const timer=setTimeout(()=>finish(new Error('DSH bridge startup timed out: '+safeDshError(client.stderr||'no bridge.ready notification'))),options.startupTimeoutMs??30000);
         function finish(error?:Error){clearTimeout(timer);release();fail();error?reject(error):resolve();}
       });
       client.initialized=await client.request('bridge.initialize',{});
@@ -65,11 +65,11 @@ export class DshBridge {
   }
   on(method:string,listener:(value:any)=>void):()=>void {const listeners=this.listeners.get(method)??new Set();listeners.add(listener);this.listeners.set(method,listeners);return()=>{listeners.delete(listener);};}
   onFailure(listener:(error:Error)=>void):()=>void {this.failureListeners.add(listener);if(this.failure)queueMicrotask(()=>listener(this.failure!));return()=>{this.failureListeners.delete(listener);};}
-  request(method:string,params:any):Promise<any> {
+  request(method:string,params:any,timeoutMs=30000):Promise<any> {
     if(this.failure)return Promise.reject(this.failure);
     const id=this.nextId++;
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`DSH ${method} timed out`));},30000);
+      const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`DSH ${method} timed out`));},timeoutMs);
       this.pending.set(id,{resolve,reject,timer});
       this.child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n',error=>{if(error){clearTimeout(timer);this.pending.delete(id);reject(error);}});
     });

@@ -83,6 +83,8 @@ The dashboard and runtime are designed for **localhost on a trusted machine**, w
 
 ## Validation status
 
+v0.2.1 fixes budget accounting for reused DSH sessions, protects newer controller scope from delayed history reads, and distinguishes rejection before native submission from an unknown result after submission. Historical missing tokens keep lifetime usage unknown; a round can have an exact token delta only while the historical unmetered event identities are unchanged and reported totals do not regress. New gaps or regression block further native dispatch under that round's token cap. These framework fixes do not establish acceptance of an ongoing research iteration.
+
 v0.2.0 passed a representative **Windows live-model acceptance run**: native DSH execution, two real child sessions (DSH and Codex), independent Codex rejection, automatic repair, and a direction change synchronized to both bound sessions. The final revised counter passed six tests and independent browser checks. A native question was answered in the workbench; real figure preview, result ZIP export and project completion were also checked. Token exhaustion stopped dispatch rather than granting acceptance, and restarting retained the original session identities.
 
 Repository tests and CI do not establish that every bundled ARIS skill, every model, or a complete scientific research program has been validated. Private research data, credentials, and raw session records are excluded from this public source release.

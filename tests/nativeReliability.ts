@@ -5,7 +5,13 @@ import {join} from 'node:path';
 import {NativeCodexDriver} from '../packages/adapters/src/native/codexDriver.ts';
 import {NativeDshDriver} from '../packages/adapters/src/native/dshDriver.ts';
 import {NativeRuntime} from '../packages/adapters/src/nativeRuntime.ts';
+import {tokenUsageDelta} from '../packages/core/src/projectBudget.ts';
 import type {NativeDriver,NativeRecord,NativeSnapshot,NativeUpdate,CollaborationScope} from '../packages/adapters/src/native/types.ts';
+const knownZero={reportedTokens:0,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]};
+assert.equal(tokenUsageDelta(knownZero,{totalTokens:0}),0,'fresh known-zero baseline survives first DSH event');
+assert.equal(tokenUsageDelta({...knownZero,reportedTokens:7},{totalTokens:0}),7);
+assert.equal(tokenUsageDelta({reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap']},{}),null,'a baseline before cold history cannot cancel historical gaps');
+assert.equal(tokenUsageDelta({...knownZero,reportedTokens:Infinity},knownZero),null);
 const deferred=()=>{let resolve!:(value:any)=>void;const promise=new Promise<any>(r=>resolve=r);return {promise,resolve};};
 const tick=()=>new Promise<void>(resolve=>setImmediate(resolve));
 const codex=new NativeCodexDriver({executable:'unused',onUpdate:()=>{}}),wire=codex as any;
@@ -44,18 +50,22 @@ const event={seq:5,time:Date.now(),type:'assistant/message',data:{message:{id:'m
 d.event(ds,event);d.event(ds,event,true);assert.equal(dshRecord.usage!.totalTokens,20);assert.equal(dshRecord.usage!.costUsd,0.02);
 d.event(ds,{...event,seq:6,data:{message:{id:'m6',usage:{input:3,output:2,totalTokens:5}}}});assert.equal(dshRecord.usage!.totalTokens,25);assert.equal(dshRecord.usage!.costUsd,undefined,'partial cost coverage stays unknown');
 const reloaded:any={...ds,record:JSON.parse(JSON.stringify(dshRecord)),events:new Map()};d.event(reloaded,event,true);assert.equal(reloaded.record.usage.totalTokens,25,'persisted native identities prevent usage double counting after restart');d.event(reloaded,{seq:7,time:Date.now(),type:'assistant/attempt',data:{attemptId:'failed-7',error:{message:'upstream timeout'}}});assert.equal(reloaded.record.usage.complete,false,'failed attempts without native usage must not be counted as free');assert.equal(reloaded.record.usage.totalTokens,undefined);await dsh.close();
+assert.equal(reloaded.record.usage.reportedTokens,25);assert.deepEqual(reloaded.record.usage.unmeteredTokenEventIds,['failed-attempt:failed-7']);
+d.event(reloaded,event,true);assert.equal(reloaded.record.usage.reportedTokens,25,'replay preserves known sum and unknown identities');
 class Driver implements NativeDriver{
- update:NativeUpdate;opened:string[]=[];openedPermissions:Array<{id:string;permissionPreset?:string;modeId?:string}>=[];sent:string[]=[];hold?:ReturnType<typeof deferred>;interruptAckOnly=false;
+ update:NativeUpdate;opened:string[]=[];openedPermissions:Array<{id:string;permissionPreset?:string;modeId?:string}>=[];sent:string[]=[];hold?:ReturnType<typeof deferred>;interruptAckOnly=false;inspectHold?:ReturnType<typeof deferred>;failAfterDispatch=false;prepareHold?:ReturnType<typeof deferred>;prepareTokens?:number;
  constructor(update:NativeUpdate){this.update=update;}
  async models(){return [];}snapshot(record:NativeRecord):NativeSnapshot{return {session:record,messages:[],activity:[],approvals:[]};}
  async open(record:NativeRecord){this.opened.push(record.id);this.openedPermissions.push({id:record.id,permissionPreset:record.permissionPreset,modeId:record.modeId});if(this.hold)await this.hold.promise;record.nativeId??='native-'+record.id;record.status='idle';this.update(record,this.snapshot(record));return this.snapshot(record);}
- async inspect(record:NativeRecord){return this.snapshot(record);}
- async send(record:NativeRecord){this.sent.push(record.id);record.status='running';this.update(record,this.snapshot(record));return {accepted:true};}
+ async inspect(record:NativeRecord){const snapshot=this.snapshot(record);if(this.inspectHold)await this.inspectHold.promise;return snapshot;}
+ async prepare(record:NativeRecord,assertCurrent:()=>void){assertCurrent();if(this.prepareHold)await this.prepareHold.promise;if(this.prepareTokens!==undefined){record.usage={...record.usage,totalTokens:this.prepareTokens,inputTokens:this.prepareTokens,outputTokens:0,complete:true};this.update(record,this.snapshot(record));}assertCurrent();}
+ async send(record:NativeRecord,_message:string,assertDispatch?:()=>void){assertDispatch?.();this.sent.push(record.id);record.status='running';this.update(record,this.snapshot(record));if(this.failAfterDispatch)throw Error('wire accepted then disconnected');return {accepted:true};}
  async interrupt(record:NativeRecord){if(!this.interruptAckOnly){record.status='interrupted';this.update(record,this.snapshot(record));}return {ok:true,confirmed:!this.interruptAckOnly};}
  async configure(record:NativeRecord){return {ok:true,session:record};}async approve(){return {ok:true};}async answer(){return {ok:true};}async close(){}
 }
 const directory=mkdtempSync(join(tmpdir(),'bri-native-reliability-'));let driver!:Driver;
 const runtime=new NativeRuntime(directory,update=>({codex:driver=new Driver(update)}));
+const assertNotSent=async(promise:Promise<{accepted:boolean;error?:string}>,pattern:RegExp)=>{const result=await promise;assert.equal(result.accepted,false);assert.match(result.error??'',pattern);};
 const createAgent=(caller:string,args:any)=>runtime.createAgent(caller,{...runtime.records.get(caller)?.native?.collaborationScope,...args});
 const sendAgentPrompt=(caller:string,target:string,message:string)=>runtime.sendAgentPrompt(caller,target,message,runtime.records.get(caller)?.native?.collaborationScope);
 const parent:NativeRecord={id:'parent',nativeId:'parent-native',cwd:join(directory,'project'),provider:'codex',title:'original parent',status:'running'};
@@ -75,11 +85,11 @@ try{
  driver.interruptAckOnly=true;const interrupted=await runtime.interruptDescendants(parent.id);assert.equal(interrupted.confirmed,false);assert.equal(runtime.records.get(a.agent.id)!.status,'running');
  driver.interruptAckOnly=false;assert.equal((await runtime.interruptDescendants(parent.id)).confirmed,true);
  runtime.import({...parent,id:'late-parent',native:undefined,status:'idle'});const lateScope={...scope,collaborationId:'late-run',actionId:'late-action'};
- driver.hold=deferred();const before=driver.sent.length,lateSend=runtime.sendMessage('late-parent','must be cancelled',{collaboration:lateScope});await tick();await runtime.setCollaborationScope('late-parent',null);driver.hold.resolve({});driver.hold=undefined;await assert.rejects(lateSend,/暂停/);assert.equal(driver.sent.length,before,'pause while opening blocks the late root dispatch');
+ driver.hold=deferred();const before=driver.sent.length,lateSend=runtime.sendMessage('late-parent','must be cancelled',{collaboration:lateScope});await tick();await runtime.setCollaborationScope('late-parent',null);driver.hold.resolve({});driver.hold=undefined;await assertNotSent(lateSend,/暂停/);assert.equal(driver.sent.length,before,'pause while opening blocks the late root dispatch');
  await runtime.setCollaborationScope(parent.id,null);
  await assert.rejects(sendAgentPrompt(parent.id,a.agent.id,'late model write'),/暂停/);
  await assert.rejects(runtime.sendMessage(a.agent.id,'direct child bypass'),/暂停/);
- await assert.rejects(runtime.sendMessage(parent.id,'late controller write',{collaboration:scope}),/撤销/);
+ await assertNotSent(runtime.sendMessage(parent.id,'late controller write',{collaboration:scope}),/撤销/);
  const next={...scope,actionId:'next',revision:2,maxSubagents:3,maxTokens:50};await runtime.setCollaborationScope(parent.id,next);
  await assert.rejects(runtime.sendMessage(a.agent.id,'old rev'),/失效/);
  const child=await createAgent(parent.id,{prompt:'metered child'});await runtime.interruptSession(child.agent.id);
@@ -89,9 +99,64 @@ try{
  await assert.rejects(sendAgentPrompt(parent.id,child.agent.id,'budget bypass'),/额度/);await assert.rejects(runtime.sendMessage(child.agent.id,'direct budget bypass'),/额度/);
  assert.equal((await runtime.listDescendants(parent.id)).length,3,'old revision descendants remain discoverable for interruption');
  runtime.import({...parent,id:'unknown-cost',native:undefined,status:'idle',lastMessageAt:new Date().toISOString(),usage:{inputTokens:1,outputTokens:1,totalTokens:2,complete:true}});await runtime.setCollaborationScope('unknown-cost',{...scope,collaborationId:'cost-run',actionId:'cost-action',maxCostUsd:1});await assert.rejects(createAgent('unknown-cost',{prompt:'unknown cost cannot be assumed free'}),/费用未知/);
+ const legacy:NativeRecord={...parent,id:'legacy-dsh',provider:'codex',native:undefined,status:'idle',lastMessageAt:new Date().toISOString(),usage:{reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap'],complete:false}};
+ runtime.import(legacy);const legacyScope={...scope,collaborationId:'legacy-run',actionId:'legacy-action',maxTokens:20};await runtime.setCollaborationScope(legacy.id,legacyScope);
+ const legacyRecord=runtime.records.get(legacy.id)!;
+ await runtime.sendMessage(legacy.id,'synthetic known-zero round',{collaboration:legacyScope});
+ legacyRecord.usage={...legacyRecord.usage,reportedTokens:107};driver.update(legacyRecord,driver.snapshot(legacyRecord));driver.update(legacyRecord,driver.snapshot(legacyRecord));
+ assert.equal(legacyRecord.native!.collaborationUsage['legacy-run'].totalTokens,7);
+ legacyRecord.usage={...legacyRecord.usage,reportedTokens:110,unmeteredTokenEventIds:['new-gap']};driver.update(legacyRecord,driver.snapshot(legacyRecord));
+ await assertNotSent(runtime.sendMessage(legacy.id,'same count changed unknown id',{collaboration:legacyScope}),/token 用量未知/);
+ legacyRecord.usage={...legacyRecord.usage,unmeteredTokenEventIds:['old-gap']};driver.update(legacyRecord,driver.snapshot(legacyRecord));
+ await assertNotSent(runtime.sendMessage(legacy.id,'coverage loss cannot be reset',{collaboration:legacyScope}),/token 用量未知/);
+ const decreasing={...legacy,id:'decreasing-dsh',native:undefined,usage:{reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap'],complete:false}};
+ runtime.import(decreasing);const decreasingScope={...scope,collaborationId:'decreasing-run',actionId:'decreasing-action',maxTokens:20};await runtime.setCollaborationScope(decreasing.id,decreasingScope);
+ const decreasingRecord=runtime.records.get(decreasing.id)!;
+ decreasingRecord.usage={...decreasingRecord.usage,reportedTokens:110};driver.update(decreasingRecord,driver.snapshot(decreasingRecord));
+ assert.equal(decreasingRecord.native!.collaborationUsage['decreasing-run'].totalTokens,10);
+ decreasingRecord.usage={...decreasingRecord.usage,reportedTokens:105};driver.update(decreasingRecord,driver.snapshot(decreasingRecord));
+ assert.equal(decreasingRecord.native!.collaborationUsage['decreasing-run'].totalTokens,10,'a reading above baseline cannot release already counted tokens');
+ await assertNotSent(runtime.sendMessage(decreasing.id,'decreasing reading',{collaboration:decreasingScope}),/token 用量未知/);
+ decreasingRecord.usage={...decreasingRecord.usage,reportedTokens:110};driver.update(decreasingRecord,driver.snapshot(decreasingRecord));
+ await assertNotSent(runtime.sendMessage(decreasing.id,'reading recovered but coverage lost',{collaboration:decreasingScope}),/token 用量未知/);
+ const migratingScope={...scope,collaborationId:'migration-run',actionId:'migration-action',maxTokens:20};
+ const migrating={...legacy,id:'migrating-dsh',native:{collaborationScope:migratingScope,collaborationUsage:{'migration-run':{totalTokens:7,tokensKnown:true}}}};runtime.import(migrating);
+ await runtime.setCollaborationScope(migrating.id,migratingScope);
+ assert.equal(runtime.records.get(migrating.id)!.native!.collaborationUsage['migration-run'].totalTokens,7,'old round counters survive the introduction of a missing baseline');
+ await assertNotSent(runtime.sendMessage(migrating.id,'cannot reconstruct old baseline',{collaboration:migratingScope}),/token 用量未知/);
+ for(const savedSnapshot of [false,true]){
+  const coldId='scope-cold-'+savedSnapshot,coldRecord:NativeRecord={...legacy,id:coldId,native:undefined,status:'idle',usage:{reportedTokens:100,unmeteredTokenEvents:1,unmeteredTokenEventIds:['old-gap'],complete:false}};
+  runtime.import(coldRecord,savedSnapshot?driver.snapshot(coldRecord):undefined);
+  const coldScope={...scope,collaborationId:'cold-run-'+savedSnapshot,actionId:'cold-action-'+savedSnapshot,maxTokens:20,maxConcurrentAgents:30};
+  driver.inspectHold=deferred();const inspection=runtime.inspectSession(coldId);await tick();
+  await runtime.setCollaborationScope(coldId,coldScope);const sentBefore=driver.sent.length;
+  const sending=runtime.sendMessage(coldId,'cold read must keep authorization',{collaboration:coldScope});await tick();assert.equal(driver.sent.length,sentBefore);
+  driver.inspectHold.resolve({});driver.inspectHold=undefined;await inspection;assert.equal((await sending).accepted,true);
+  const stored=runtime.records.get(coldId)!;assert.equal(stored.native!.collaborationScope.actionId,coldScope.actionId);
+  assert.equal(stored.native!.collaborationTokenBaselines[coldScope.collaborationId].reportedTokens,100);
+  assert.equal(stored.native!.collaborationUsage[coldScope.collaborationId].totalTokens,0);
+  const nextScope={...coldScope,actionId:coldScope.actionId+'-next',createdAt:coldScope.createdAt+1};
+  driver.inspectHold=deferred();const oldRead=runtime.inspectSession(coldId);await tick();await runtime.setCollaborationScope(coldId,nextScope);await runtime.setCollaborationScope(coldId,null);
+  driver.inspectHold.resolve({});driver.inspectHold=undefined;await oldRead;
+  assert.equal(stored.native!.collaborationScope.active,false,'an old read cannot restore paused authorization');
+  assert.equal(stored.native!.revokedCollaborationActions[coldScope.actionId].permanent,true);
+  assert.equal(stored.native!.revokedCollaborationActions[nextScope.actionId].permanent,true);
+  const afterPause=driver.sent.length;await assertNotSent(runtime.sendMessage(coldId,'paused after history read',{collaboration:nextScope}),/撤销/);assert.equal(driver.sent.length,afterPause);
+ }
+ const preparation:NativeRecord={...parent,id:'maintenance-budget',native:undefined,status:'idle',usage:{inputTokens:0,outputTokens:0,totalTokens:0,complete:true}};runtime.import(preparation);
+ const preparationScope={...scope,collaborationId:'maintenance-run',actionId:'maintenance-action',maxTokens:10,maxConcurrentAgents:30};const preparationBefore=driver.sent.length;
+ driver.prepareTokens=10;await assertNotSent(runtime.sendMessage(preparation.id,'budget after compaction',{collaboration:preparationScope}),/额度/);driver.prepareTokens=undefined;assert.equal(driver.sent.length,preparationBefore,'maintenance billing is checked before the research prompt');assert.equal(preparation.native!.lastPromptAt,undefined);
+ const successfulPreparation:NativeRecord={...parent,id:'maintenance-success',native:undefined,status:'idle',usage:{inputTokens:0,outputTokens:0,totalTokens:0,complete:true}};runtime.import(successfulPreparation);const successfulScope={...preparationScope,collaborationId:'maintenance-success-run',actionId:'maintenance-success-action'};driver.prepareTokens=5;assert.equal((await runtime.sendMessage(successfulPreparation.id,'metered maintenance then research',{collaboration:successfulScope})).accepted,true);driver.prepareTokens=undefined;assert.equal(successfulPreparation.native!.collaborationUsage[successfulScope.collaborationId].totalTokens,5);assert.equal(successfulPreparation.native!.collaborationUsage[successfulScope.collaborationId].tokensKnown,true,'successful metered maintenance keeps token coverage known');const preparationAfter=driver.sent.length;
+ const preparationPause:NativeRecord={...parent,id:'maintenance-pause',native:undefined,status:'idle'};runtime.import(preparationPause);const pauseScope={...scope,collaborationId:'maintenance-pause-run',actionId:'maintenance-pause-action',maxConcurrentAgents:30};
+ driver.prepareHold=deferred();const preparationSending=runtime.sendMessage(preparationPause.id,'pause during maintenance',{collaboration:pauseScope});await tick();await runtime.setCollaborationScope(preparationPause.id,null);driver.prepareHold.resolve({});driver.prepareHold=undefined;await assertNotSent(preparationSending,/暂停/);assert.equal(driver.sent.length,preparationAfter,'revoked maintenance never sends a research prompt');
+ const pendingMaintenance:NativeRecord={...parent,id:'pending-maintenance',native:{compactionPending:true},status:'idle'};runtime.import(pendingMaintenance);driver.interruptAckOnly=true;assert.equal((await runtime.interruptSession(pendingMaintenance.id)).confirmed,false,'persisted maintenance cannot be declared stopped from native idle status or cancel ACK');driver.interruptAckOnly=false;pendingMaintenance.native!.compactionPending=false;assert.equal((await runtime.interruptSession(pendingMaintenance.id)).confirmed,true);
+ const wireRecord:NativeRecord={...legacy,id:'post-wire-failure',native:undefined,status:'idle'};runtime.import(wireRecord);
+ const wireScope={...scope,collaborationId:'wire-run',actionId:'wire-action',maxTokens:20,maxConcurrentAgents:30};driver.failAfterDispatch=true;
+ const wireBefore=driver.sent.length;await assert.rejects(runtime.sendMessage(wireRecord.id,'one delivery only',{collaboration:wireScope}),/wire accepted then disconnected/);driver.failAfterDispatch=false;
+ assert.equal(driver.sent.length,wireBefore+1,'a failed receipt after dispatch stays uncertain and is never replayed');
  await runtime.close();
  const resumed=new NativeRuntime(directory,update=>({codex:new Driver(update)}));
- try{assert.equal(resumed.records.get(parent.id)!.nativeId,'parent-native');await assert.rejects(resumed.createAgent(parent.id,{...next,prompt:'after reboot'}),/恢复确认/);await resumed.setCollaborationScope(parent.id,next);assert.equal(resumed.records.get(parent.id)!.native!.collaborationRecoveryPending,false);}finally{await resumed.close();}
+ try{assert.equal(resumed.records.get(decreasing.id)!.native!.collaborationUsage['decreasing-run'].tokenCoverageLost,true);assert.equal(resumed.records.get(decreasing.id)!.native!.collaborationUsage['decreasing-run'].totalTokens,10);await resumed.setCollaborationScope(decreasing.id,decreasingScope);await assertNotSent(resumed.sendMessage(decreasing.id,'restart cannot release counted tokens',{collaboration:decreasingScope}),/token 用量未知/);assert.equal(resumed.records.get(parent.id)!.nativeId,'parent-native');await assert.rejects(resumed.createAgent(parent.id,{...next,prompt:'after reboot'}),/恢复确认/);await resumed.setCollaborationScope(parent.id,next);assert.equal(resumed.records.get(parent.id)!.native!.collaborationRecoveryPending,false);}finally{await resumed.close();}
 }finally{await runtime.close();rmSync(directory,{recursive:true,force:true});}
 const permissionDirectory=mkdtempSync(join(tmpdir(),'bri-native-child-permissions-'));const permissionDrivers:Record<string,Driver>={};
 const permissions=new NativeRuntime(permissionDirectory,update=>Object.fromEntries(['codex','dsh-pi'].map(provider=>[provider,permissionDrivers[provider]=new Driver(update)])));

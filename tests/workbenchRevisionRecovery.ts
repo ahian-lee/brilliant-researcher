@@ -10,17 +10,19 @@ const sessions: LiveSession[] = [];
 const messages = new Map<string, Array<{id:string;role:string;text:string}>>();
 const sends: Array<{sessionId:string;revision:number;kind:string}> = [];
 let serial = 0;
+let loseNextSend = false;
 const runtime: ResearchRuntime = {
   async providers() { return [{id:'dsh-pi',name:'DSH',available:true},{id:'codex',name:'Codex',available:true}]; },
   async models(provider) { return [{id:provider==='codex'?'gpt-6.1-sol':'qwen',name:'fixture',thinkingOptions:[{id:'high',label:'high'}]}]; },
   async listSessions() { return sessions; },
-  async createSession(input) { const session={...input,id:String(++serial),status:'idle',title:input.title!}; sessions.push(session); messages.set(session.id,[]); return session; },
+  async createSession(input) { const session={...input,id:String(++serial),status:'idle',title:input.title!,usage:{totalTokens:100,costUsd:1}}; sessions.push(session); messages.set(session.id,[]); return session; },
   async inspectSession(id) { return {session:sessions.find(s=>s.id===id)!,messages:messages.get(id)!,approvals:[]}; },
   async sendMessage(sessionId,prompt) {
     const identity=[...prompt.matchAll(/\{"actionId":"[^"]+","revision":(\d+),"kind":"(execute|review|sync|plan)"/g)].at(-1);
     if(identity){
       const delivery={sessionId,revision:Number(identity[1]),kind:identity[2]}; sends.push(delivery);
       sessions.find(s=>s.id===sessionId)!.status='running';
+      if(loseNextSend){loseNextSend=false;throw new Error('fixture delivery result unknown');}
       if(delivery.revision===2&&delivery.kind==='execute')throw new Error('remote accepted the task; response lost');
     }
     return {accepted:true};
@@ -79,6 +81,62 @@ try {
   assert.equal(JSON.parse(readFileSync(join(created.project.root,'.aris/progress.json'),'utf8')).run_id,currentNative.run_id);
   assert.equal(sends.filter(s=>s.revision===2&&s.kind==='execute').length,1,'recovery observes the matching receipt without replaying the uncertain send');
   console.log('PASS workbench revision recovery: ACK loss after steering, current native round recovered from receipt, independent acceptance, previous round preserved, no send replay');
+  {
+    const recoveryFixture=async(name:string)=>{
+      const directory=join(root,name);mkdirSync(directory,{recursive:true});
+      const registryFile=join(directory,'projects.json');writeFileSync(registryFile,'{"projects":[]}');
+      const make=()=>{const coordinator=new ResearchWorkbench({repoRoot:directory,registryFile,runtime});connectCollaborations(coordinator,{recordAris:false});return coordinator;};
+      const coordinator=make();
+      const created=await coordinator.createProject({accessMode:'review',name,goal:'fixture recovery',provider:'dsh-pi',model:'qwen',workflow:'free',autoCollaborate:true,budget:{maxDurationMs:60000}});
+      assert.ok(!('error' in created),JSON.stringify(created));
+      const executor=sessions.find(s=>s.id===coordinator.collaborationStatus!(created.project.id)!.executorSessionId)! as LiveSession & {usage:{totalTokens:number;costUsd:number}};
+      executor.usage={totalTokens:700,costUsd:2};
+      return {coordinator,created,make,file:join(created.project.root,'.bri/collaboration.json')};
+    };
+    for(const stoppedState of ['paused','needs_attention'] as const){
+      const f=await recoveryFixture(`days-later-${stoppedState}`),projectId=f.created.project.id;
+      const original=f.coordinator.collaborationStatus!(projectId)!;
+      if(stoppedState==='paused'){
+        await f.coordinator.pauseCollaboration!(projectId);await f.coordinator.tickCollaborations!();
+      }else{
+        const action=original.actions[0];
+        messages.get(action.sessionId)!.push({id:`blocked-${action.id}`,role:'assistant',text:JSON.stringify({actionId:action.id,revision:action.revision,kind:'execute',outcome:'blocked',summary:'fixture unavailable',reason:'fixture dependency missing',artifacts:[],tests:[]})});
+        sessions.find(s=>s.id===action.sessionId)!.status='idle';await f.coordinator.tickCollaborations!();
+      }
+      assert.equal(f.coordinator.collaborationStatus!(projectId)!.state,stoppedState);
+      const saved=JSON.parse(readFileSync(f.file,'utf8'));
+      saved.runs.at(-1).createdAt-=3*24*60*60_000;
+      writeFileSync(f.file,JSON.stringify(saved));
+      const historical=structuredClone(saved.runs.at(-1)),sessionCount=sessions.length;
+      assert.equal(historical.usage.totalTokens,600,'the old round retains real accumulated fixture usage');
+      const restored=f.make();
+      await restored.send(projectId,original.executorSessionId,'Continue after repairing the dependency',undefined,false);
+      const next=restored.collaborationStatus!(projectId)!;
+      assert.notEqual(next.id,original.id,'continuing a stopped round creates a fresh round');
+      assert.equal(next.state,'executing','days offline cannot exhaust the new round before dispatch');
+      assert.ok(Date.now()-next.createdAt<60000);
+      assert.equal(next.revision,1);assert.equal(next.revisionsUsed,0);
+      assert.equal(next.usage?.totalTokens,0,'the new round starts from the current native usage rather than spending the old round again');
+      assert.equal(next.executorSessionId,original.executorSessionId);assert.equal(next.reviewerSessionId,original.reviewerSessionId);
+      assert.equal(sessions.length,sessionCount,'continuation reuses the bound conversations');
+      assert.deepEqual(JSON.parse(readFileSync(f.file,'utf8')).runs.find((r:any)=>r.id===original.id),historical,'old timestamps, usage, actions and receipts remain unchanged');
+    }
+    loseNextSend=true;
+    const f=await recoveryFixture('unknown-delivery-barrier'),projectId=f.created.project.id;
+    const uncertain=f.coordinator.collaborationStatus!(projectId)!;
+    assert.ok(uncertain.actions[0].sendUncertain);
+    sessions.find(s=>s.id===uncertain.executorSessionId)!.status='idle';
+    await f.coordinator.pauseCollaboration!(projectId);
+    assert.equal(f.coordinator.collaborationStatus!(projectId)!.state,'stopping');
+    const before=sends.length;
+    await f.coordinator.send(projectId,uncertain.executorSessionId,'Continue while delivery is unresolved',undefined,false);
+    await f.coordinator.tickCollaborations!();
+    assert.equal(f.coordinator.collaborationStatus!(projectId)!.id,uncertain.id);
+    assert.equal(f.coordinator.collaborationStatus!(projectId)!.state,'stopping');
+    assert.equal(sends.length,before,'an idle snapshot cannot bypass the uncertain-delivery stop barrier');
+    await assert.rejects(f.coordinator.startCollaboration!(projectId,{reuseExisting:true,executorSessionId:uncertain.executorSessionId,reviewerSessionId:uncertain.reviewerSessionId,task:'replacement'}),/已有协作正在运行/);
+    console.log('PASS stopped-round continuation: days-later paused/faulted recovery reuses conversations, preserves history, uncertain delivery stays blocked');
+  }
   {
     const originalPrepare=workbench.prepareSessionAccess.bind(workbench);
     let rejectPreflight=true;

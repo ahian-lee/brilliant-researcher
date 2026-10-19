@@ -4,6 +4,7 @@ import {randomUUID} from 'node:crypto';
 import type {ResearchRuntime,LiveSession} from '../../core/src/researchWorkbench.ts';
 import {presentNative} from './native/presentation.ts';
 import {atomicWriteFileSync} from './native/atomicWrite.ts';
+import {tokenUsageDelta} from '../../core/src/projectBudget.ts';
 import type {NativeDriver,NativeRecord,NativeSnapshot,NativeUpdate,CollaborationScope,NativeDelegation,CollaborationRequestIdentity} from './native/types.ts';
 
 export class NativeRuntime implements ResearchRuntime {
@@ -107,9 +108,10 @@ export class NativeRuntime implements ResearchRuntime {
    reading=(async()=>{
     const current=this.records.get(id)!;
     const inspected=await this.driver(current).inspect({...current,native:current.native?{...current.native}:undefined},this.snapshots.get(id));
-    // A live event delivered while history was being read owns status and pending
-    // interactions. Do not replace it with an older asynchronous read result.
-    const snapshot=(this.updateVersions.get(id)||0)!==version&&this.snapshots.has(id)?this.snapshots.get(id)!:this.remember(id,inspected);
+    // Live events and controller scope changes supersede the in-flight history
+    // record. Preserve current authorization even before a first snapshot exists.
+    const changed=(this.updateVersions.get(id)||0)!==version;
+    const snapshot=changed?(this.snapshots.get(id)??this.remember(id,{...inspected,session:this.records.get(id)!})):this.remember(id,inspected);
     this.persist(id);return snapshot;
    })().finally(()=>this.reading.delete(id));
    this.reading.set(id,reading);
@@ -127,10 +129,14 @@ export class NativeRuntime implements ResearchRuntime {
    if(options?.collaboration){dispatchScope={...options.collaboration};await this.setCollaborationScope(id,dispatchScope);try{this.assertBudget(dispatchScope);}catch(error){if(dispatchScope.collaborationId.startsWith('direct-'))await this.stopDirect(id,dispatchScope,error instanceof Error?error.message:String(error));throw error;}if(dispatchScope.collaborationId.startsWith('direct-')&&dispatchScope.maxDurationMs!==undefined&&Date.now()-(dispatchScope.createdAt??Date.now())>=dispatchScope.maxDurationMs)throw Error('直接执行时间预算已用尽');}
    else if(record.delegation||record.native?.collaborationScope)dispatchScope={...this.scope(record)};
    assertDispatch();record=await this.opened(id);assertDispatch();
+   await this.driver(record).prepare?.(record,assertDispatch);assertDispatch();
    const scope=dispatchScope,prompt=scope?message+`\n\n本动作协作身份：${JSON.stringify({collaborationId:scope.collaborationId,actionId:scope.actionId,revision:scope.revision})}。调用 create_agent / send_agent_prompt（Codex动态工具名 bri_create_agent / bri_send_agent_prompt；DSH完整工具名 mcp__bri-collaboration__create_agent / mcp__bri-collaboration__send_agent_prompt，观察用 mcp__bri-collaboration__get_agent / mcp__bri-collaboration__wait_agent）时，必须原样携带这三个字段；委派无需先运行Node或shell。不得从其他动作或后续要求猜测身份。子任务继承同一身份，旧动作请求被拒绝时停止，不替换为新身份重试。`:message;
    this.confirmedTerminals.delete(id);
    record.native={...record.native,lastPromptAt:new Date().toISOString(),...(dispatchScope?{collaborationOwnerRecoveryPending:true}:{})};this.persist(id);
    return await this.driver(record).send(record,prompt,()=>{assertDispatch();wrote=true;});
+  }catch(error){
+   if(options?.collaboration&&!wrote)return {accepted:false,error:error instanceof Error?error.message:String(error)};
+   throw error;
   }finally{
    this.pendingSends.delete(id);const interrupted=this.pendingInterrupts.delete(id);let revoked=false;try{assertScope();}catch{revoked=!!dispatchScope;}
    // A native request can already be on the wire when pause arrives. Settle it,
@@ -142,8 +148,8 @@ export class NativeRuntime implements ResearchRuntime {
  async interruptSession(id:string){
   const record=this.record(id);
   if(this.pendingSends.has(id)){this.pendingInterrupts.add(id);return {ok:true,confirmed:false,status:this.visible(record).status};}
-  const snapshot=this.snapshots.get(id);if(!['running','starting','waiting_input'].includes(record.status)&&!snapshot?.activeTurn&&!snapshot?.approvals.length&&!this.opening.has(id)&&!this.pendingSends.has(id))return {ok:true,confirmed:['idle','interrupted'].includes(record.status),status:record.status};
-  const opened=await this.opened(id);try{const result=await this.driver(opened).interrupt(opened);if(this.pendingSends.has(id))this.pendingInterrupts.add(id);return {...result,confirmed:!this.pendingSends.has(id)&&(result.confirmed===true||['idle','interrupted'].includes(opened.status)),status:this.visible(opened).status};}finally{this.persist(id);}
+  const snapshot=this.snapshots.get(id);if(!['running','starting','waiting_input'].includes(record.status)&&!snapshot?.activeTurn&&!snapshot?.approvals.length&&!this.opening.has(id)&&!this.pendingSends.has(id)&&!record.native?.compactionPending)return {ok:true,confirmed:['idle','interrupted'].includes(record.status),status:record.status};
+  const opened=await this.opened(id);try{const result=await this.driver(opened).interrupt(opened);if(this.pendingSends.has(id))this.pendingInterrupts.add(id);return {...result,confirmed:!this.pendingSends.has(id)&&!opened.native?.compactionPending&&(result.confirmed===true||['idle','interrupted'].includes(opened.status)),status:this.visible(opened).status};}finally{this.persist(id);}
  }
  async updateSession(id:string,input:Parameters<NonNullable<ResearchRuntime['updateSession']>>[1]){const existing=this.record(id);if(resolve(existing.cwd||'').toLowerCase()!==resolve(input.cwd).toLowerCase())throw Error('会话目录不匹配');const record=await this.opened(id);try{const result=await this.driver(record).configure(record,input);if(result.session.id!==id)throw Error('原生驱动返回了不匹配的会话');Object.assign(this.records.get(id)!,result.session);return {...result,session:this.records.get(id)!};}finally{this.persist(id);}}
  async respondApproval(id:string,approvalId:string,optionId:string){this.assertDelegation(this.record(id));const record=await this.opened(id);this.assertDelegation(record);try{return await this.driver(record).approve(record,approvalId,optionId);}finally{this.persist(id);}}
@@ -154,23 +160,26 @@ export class NativeRuntime implements ResearchRuntime {
   const scope=record.native?.collaborationScope as CollaborationScope|undefined;
   if(!scope||!usage)return;
   const counters={...(record.native?.collaborationUsage??{})},current=counters[scope.collaborationId]??{totalTokens:0};
+  const previousScopedTokens=current.totalTokens;
   if(typeof usage.totalTokens==='number')current.totalTokens+=Math.max(0,usage.totalTokens-(previous?.tokens??0));
   if(typeof usage.costUsd==='number')current.costUsd=(current.costUsd??0)+Math.max(0,usage.costUsd-(previous?.cost??0));
   current.tokensKnown=typeof usage.totalTokens==='number';current.costKnown=typeof usage.costUsd==='number';counters[scope.collaborationId]=current;record.native={...record.native,collaborationUsage:counters};
+  const baseline=record.native?.collaborationTokenBaselines?.[scope.collaborationId];
+  if(baseline){const delta=tokenUsageDelta(usage,baseline);current.tokenCoverageLost=current.tokenCoverageLost===true||delta===null||delta<previousScopedTokens;current.tokensKnown=!current.tokenCoverageLost;current.totalTokens=delta!==null&&delta>=previousScopedTokens?delta:previousScopedTokens;}
   if(scope.active&&scope.collaborationId.startsWith('direct-')){try{this.assertBudget(scope);}catch(error){let owner=record;while(owner.delegation&&this.records.has(owner.delegation.parentSessionId))owner=this.records.get(owner.delegation.parentSessionId)!;queueMicrotask(()=>{void this.stopDirect(owner.id,scope,error instanceof Error?error.message:String(error));});}}
  }
  async setCollaborationScope(id:string,scope:CollaborationScope|null){
   const record=this.record(id);if(record.delegation)throw Error('只有控制器父会话可设置协作范围');
   const previous=record.native?.collaborationScope as CollaborationScope|undefined;
   const revoked={...(record.native?.revokedCollaborationActions??{})};
-  if(!scope){if(previous)revoked[previous.actionId]={permanent:true};record.native={...record.native,collaborationScope:previous?{...previous,active:false}:undefined,revokedCollaborationActions:revoked};this.clearDirectTimer(id);this.persist(id);return {ok:true};}
+  if(!scope){if(previous)revoked[previous.actionId]={permanent:true};record.native={...record.native,collaborationScope:previous?{...previous,active:false}:undefined,revokedCollaborationActions:revoked};this.updateVersions.set(id,(this.updateVersions.get(id)||0)+1);this.clearDirectTimer(id);this.persist(id);return {ok:true};}
   if(!scope.collaborationId||!scope.actionId||!Number.isInteger(scope.revision)||typeof scope.task!=='string'||typeof scope.active!=='boolean')throw Error('协作范围无效');
   for(const key of ['maxConcurrentAgents','maxSubagents','maxTokens','maxCostUsd'] as const)if(scope[key]!==undefined&&(!Number.isFinite(scope[key])||scope[key]!<0))throw Error('协作额度无效');
   const mark=revoked[scope.actionId],same=previous?.actionId===scope.actionId&&previous?.collaborationId===scope.collaborationId&&previous?.revision===scope.revision;
   if(!scope.active){
    const permanent=mark===true||mark?.permanent===true||scope.recoveryAllowed!==true;
    revoked[scope.actionId]={permanent,recoverable:!permanent};
-   record.native={...record.native,...(same?{collaborationScope:{...scope}}:{}),revokedCollaborationActions:revoked};if(same)this.clearDirectTimer(id);this.persist(id);return {ok:true};
+   record.native={...record.native,...(same?{collaborationScope:{...scope}}:{}),revokedCollaborationActions:revoked};this.updateVersions.set(id,(this.updateVersions.get(id)||0)+1);if(same)this.clearDirectTimer(id);this.persist(id);return {ok:true};
   }
   const recoveries={...(record.native?.collaborationRecoveryAttempts??{})};
   if(mark){
@@ -190,6 +199,8 @@ export class NativeRuntime implements ResearchRuntime {
   if(previous&&previous.actionId!==scope.actionId)revoked[previous.actionId]={permanent:true};
   const normalized=scope.recoveryMode==='format'?{...scope,maxSubagents:0}:scope;
   record.native={...record.native,collaborationScope:{...normalized},collaborationRecoveryPending:false,revokedCollaborationActions:revoked,collaborationRecoveryAttempts:recoveries};
+  if(record.provider==='dsh-pi'||record.usage?.unmeteredTokenEvents!==undefined){const baselines={...(record.native.collaborationTokenBaselines??{})};baselines[scope.collaborationId]??={...record.usage,...(record.usage?.unmeteredTokenEvents===undefined&&record.usage?.complete&&typeof record.usage.totalTokens==='number'?{reportedTokens:record.usage.totalTokens,unmeteredTokenEvents:0,unmeteredTokenEventIds:[]}: {})};record.native.collaborationTokenBaselines=baselines;this.meter(record);}
+  this.updateVersions.set(id,(this.updateVersions.get(id)||0)+1);
   this.usageWatermarks.set(id,{tokens:record.usage?.totalTokens??record.native?.nativeUsageWatermark?.tokens,cost:record.usage?.costUsd??record.native?.nativeUsageWatermark?.cost});this.persist(id);this.watchDirect(id,normalized);return {ok:true};
  }
  private clearDirectTimer(id:string){const timer=this.directTimers.get(id);if(timer)clearTimeout(timer);this.directTimers.delete(id);}
@@ -238,7 +249,7 @@ export class NativeRuntime implements ResearchRuntime {
   if(scope.maxCostUsd!==undefined&&usage.reduce((sum,value)=>sum+(value?.costUsd??0),0)>=scope.maxCostUsd)throw Error('协作费用额度已用尽');
   // A finished native attempt without metering cannot be treated as free work.
   const unmetered=records.filter(record=>(record.lastMessageAt||record.native?.lastPromptAt)&&!['starting'].includes(record.status));
-  if(scope.maxTokens!==undefined&&unmetered.some(record=>!record.usage?.complete||typeof record.usage?.totalTokens!=='number'))throw Error('原生 token 用量未知，不能确认剩余额度');
+  if(scope.maxTokens!==undefined&&unmetered.some(record=>record.native?.collaborationTokenBaselines?.[scope.collaborationId]?record.native?.collaborationUsage?.[scope.collaborationId]?.tokensKnown!==true:!record.usage?.complete||typeof record.usage?.totalTokens!=='number'))throw Error('原生 token 用量未知，不能确认剩余额度');
   if(scope.maxCostUsd!==undefined&&unmetered.some(record=>typeof record.usage?.costUsd!=='number'))throw Error('原生费用未知，不能确认剩余额度');
  }
  async listDescendants(parentSessionId:string){
@@ -287,7 +298,7 @@ export class NativeRuntimeClient implements ResearchRuntime {
  private async call<T>(operation:string,args:unknown[]):Promise<T>{
   const readOnly=['providers','models','listSessions','inspectSession','listDescendants'].includes(operation);
   for(let attempt=0;;attempt++){
-   try{const response=await fetch(this.base+'/runtime',{method:'POST',headers:{'content-type':'application/json','x-bri-native':'1',...(attempt?{connection:'close'}:{})},body:JSON.stringify({operation,args}),signal:AbortSignal.timeout(90000)});const data=await response.json() as any;if(!response.ok)throw Error(data.error||`原生服务异常 ${response.status}`);return data;}
+   try{const response=await fetch(this.base+'/runtime',{method:'POST',headers:{'content-type':'application/json','x-bri-native':'1',...(attempt?{connection:'close'}:{})},body:JSON.stringify({operation,args}),signal:AbortSignal.timeout(operation==='sendMessage'?360000:90000)});const data=await response.json() as any;if(!response.ok)throw Error(data.error||`原生服务异常 ${response.status}`);return data;}
    catch(error){const code=(error as any)?.cause?.code;if(!readOnly||attempt!==0||!['ECONNRESET','EPIPE','UND_ERR_SOCKET'].includes(code))throw error;}
   }
  }
@@ -303,7 +314,7 @@ export class NativeRuntimeClient implements ResearchRuntime {
     return {...approval,description:approval.description+(related.length===1?`\n当前工具调用：${related[0].description||related[0].summary}`:''),options:approval.options.map(option=>['allow_once','accept','allow'].includes(option.id)?{...option,id:'allow-once'}:option)};
   })};
  }
- sendMessage(id:string,message:string,options?:{collaboration?:CollaborationScope}){return this.call<{accepted:boolean;status?:string}>('sendMessage',[id,message,options])}
+ sendMessage(id:string,message:string,options?:{collaboration?:CollaborationScope}){return this.call<{accepted:boolean;status?:string;error?:string}>('sendMessage',[id,message,options])}
  setCollaborationScope(id:string,scope:CollaborationScope|null){return this.call<{ok:boolean}>('setCollaborationScope',[id,scope])}
  listDescendants(id:string){return this.call<LiveSession[]>('listDescendants',[id])}
  interruptDescendants(id:string){return this.call<{ok:boolean;confirmed:boolean;results:unknown[]}>('interruptDescendants',[id])}

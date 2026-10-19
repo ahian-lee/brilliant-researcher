@@ -31,7 +31,7 @@ export interface ResearchRuntime {
   createSession(input: { cwd: string; provider: string; model?: string; thinkingOptionId?: string; permissionPreset?: 'auto' | 'danger-full-access'; modeId?: 'full-access' | 'auto'; prompt?: string; title?: string }): Promise<LiveSession>;
   updateSession?(id: string, input: { cwd: string; model?: string | null; thinkingOptionId?: string | null; permissionPreset?: 'auto' | 'danger-full-access'; modeId?: 'full-access' | 'auto' }): Promise<{ ok: boolean; session: LiveSession; notice?: string }>;
   inspectSession(id: string): Promise<{ activity?: Array<{ id: string; tool: string; summary: string; status?: string; target?: string; description?: string; error?: string; at?: string }>; activeTurn?: unknown; session: LiveSession; messages: Array<{ id: string; role: string; text: string; at?: string | null }>; approvals?: unknown[] }>;
-  sendMessage(id: string, message: string, context?: { collaboration?: CollaborationScope }): Promise<{ accepted: boolean; status?: string }>;
+  sendMessage(id: string, message: string, context?: { collaboration?: CollaborationScope }): Promise<{ accepted: boolean; status?: string; error?:string }>;
   setCollaborationScope?(id: string, scope: CollaborationScope | null): Promise<unknown>;
   listDescendants?(parentSessionId: string): Promise<LiveSession[]>;
   interruptDescendants?(parentSessionId: string): Promise<unknown>;
@@ -598,11 +598,11 @@ export class ResearchWorkbench {
       content=`本轮范围：${scope}。受影响阶段：${affected.join('、')}。\n用户要求：${content}\n保留前轮成果与验收记录，为本轮使用新的 ARIS 记录。不覆盖旧结论；遵守已有数据、资源和用户决定约束。先检查已有产物和证据，再针对上述要求重做，由绑定 Codex 独立审核并自动返修。`;
     }
     if (run && [run.executorSessionId, run.reviewerSessionId].includes(sessionId)) {
-      // A completed round has spent its own budget. Reuse conversations, not
-      // that round's elapsed time or repair count. In-flight changes still sync.
+      // A stopped round keeps its own elapsed time, usage and receipts. Start
+      // a fresh round with the same conversations; in-flight changes still sync.
       this.recordContinuation(id,sessionId,content,affected);
       const planning=(auditFirst as boolean|undefined) ?? (!!affected||run.auditFirst===true||['accepted','audited','budget_exhausted'].includes(run.state));
-      const updated = ['accepted','audited','budget_exhausted'].includes(run.state)
+      const updated = ['accepted','audited','budget_exhausted','paused','needs_attention'].includes(run.state)
         ? await this.startCollaboration!(id,{reuseExisting:true,executorSessionId:run.executorSessionId,reviewerSessionId:run.reviewerSessionId,task:content,auditFirst:planning})
         : await this.steerCollaboration!(id, content,{auditFirst:planning});
       this.setCompleted(id,false);
