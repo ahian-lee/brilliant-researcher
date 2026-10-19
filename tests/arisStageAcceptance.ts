@@ -44,9 +44,72 @@ async function fixture(workflow:string){
   messages.get(action.sessionId)!.push({id:`reply-${action.id}`,role:'assistant',text:JSON.stringify({actionId:action.id,revision:action.revision,kind,...payload,...extra})});sessions.find(row=>row.id===action.sessionId)!.status='idle';
   await workbench.tickCollaborations!();
  };
- return {workbench,project,status,finish,old,read:(id:string)=>JSON.parse(readFileSync(join(project.root,`.aris/runs/${id}.json`),'utf8')),assertOld:()=>assert.equal(readFileSync(join(project.root,'.aris/runs/old-run.json'),'utf8'),old)};
+ return {workbench,project,sessions,status,finish,old,read:(id:string)=>JSON.parse(readFileSync(join(project.root,`.aris/runs/${id}.json`),'utf8')),assertOld:()=>assert.equal(readFileSync(join(project.root,'.aris/runs/old-run.json'),'utf8'),old)};
 }
 try{
+ {
+  const root=join(scratch,'observed-executor');mkdirSync(root);
+  const runFile=(id:string)=>join(root,`.aris/runs/${id}.json`);
+  const read=(id:string)=>JSON.parse(readFileSync(runFile(id),'utf8'));
+  const start=async(id:string,executor:string)=>{
+   await native(['start',root,id,'--phases','analysis,untouched','--executor',executor]);
+   await native(['set',root,id,'analysis','done','--artifact','report.md']);
+  };
+  const acceptArgs=(id:string,executor?:string)=>['accept',root,id,'analysis','--verdict-id','fixture-review','--reviewer','gpt-6.1-sol',...(executor===undefined?[]:['--executor',executor])];
+  await start('old','qwen');const old=readFileSync(runFile('old'),'utf8');
+  for(const agent of ['dsh','dsh-pi']){
+   const id=`observed-${agent}`;await start(id,agent);const untouched=read(id).phases[1];
+   await native(acceptArgs(id,'ustc/deepseek-flash'));
+   const state=read(id),phase=state.phases[0];
+   assert.equal(phase.status,'accepted');assert.equal(phase.review_independence,'cross-family');
+   assert.equal(phase.executor_model,'ustc/deepseek-flash');assert.equal(phase.executor_family,'deepseek');assert.equal(phase.executor_agent,agent);
+   assert.equal(state.executor_model,agent,'the original run declaration is retained');
+   assert.deepEqual(state.phases[1],untouched,'resolving one phase cannot rewrite another phase');
+  }
+  await start('same-family','dsh');const sameBefore=readFileSync(runFile('same-family'),'utf8');
+  await assert.rejects(native(acceptArgs('same-family','ustc/gpt-6.1-sol')),/same-family/);
+  assert.equal(readFileSync(runFile('same-family'),'utf8'),sameBefore,'a same-family rejection does not mutate provenance');
+  await native(['mark-provisional',root,'same-family','analysis','--verdict-id','fixture-review','--reviewer','gpt-6.1-sol','--executor','ustc/gpt-6.1-sol']);
+  assert.equal(read('same-family').phases[0].status,'provisional','same-family review remains explicitly provisional');
+  await start('unknown','dsh');const unknownBefore=readFileSync(runFile('unknown'),'utf8');
+  await assert.rejects(native(acceptArgs('unknown')),/cannot classify acceptance families/);
+  await assert.rejects(native(acceptArgs('unknown','unreported-model')),/cannot classify acceptance families.*observed executor/);
+  assert.equal(readFileSync(runFile('unknown'),'utf8'),unknownBefore,'missing or unknown observation cannot manufacture accepted state');
+  await start('known-model','gpt-6.1-sol');const knownBefore=readFileSync(runFile('known-model'),'utf8');
+  for(const extra of [[],['--force']])await assert.rejects(native([...acceptArgs('known-model','ustc/deepseek-flash'),...extra]),/cannot override recorded executor model/);
+  assert.equal(readFileSync(runFile('known-model'),'utf8'),knownBefore,'force cannot overwrite a different recorded model');
+  await native(['accept',root,'known-model','analysis','--verdict-id','fixture-cross-review','--reviewer','claude-opus','--executor','gpt-6.1-sol']);
+  assert.equal(read('known-model').phases[0].executor_model,'gpt-6.1-sol','an identical explicit model remains compatible');
+  assert.equal(readFileSync(runFile('old'),'utf8'),old,'observed-model resolution leaves old runs byte-for-byte unchanged');
+  console.log('PASS observed ARIS executor: DSH labels resolve to reported model, cross-family acceptance only, unknown/same-family fail closed, known-model override refused, original declarations and old runs preserved');
+ }
+ for(const scenario of [
+  {agent:'dsh',observed:'ustc/deepseek-flash',expected:'accepted'},
+  {agent:'dsh-pi',observed:'ustc/gpt-6.1-sol',expected:'provisional'},
+  {agent:'dsh',observed:undefined,expected:'done'},
+ ]){
+  const f=await fixture('analyze-results'),executor=f.sessions.find(s=>s.id===f.status().executorSessionId)!;
+  executor.runtimeModel=scenario.observed;
+  assert.equal(executor.model,'qwen','a configured fixture model exists even when runtime observation is missing');
+  await native(['start',f.project.root,'observed-runtime','--phases','analysis','--executor',scenario.agent]);
+  await native(['set',f.project.root,'observed-runtime','analysis','done','--artifact','report.md']);
+  await f.finish('execute',{arisRunId:'observed-runtime'});await f.finish('review');
+  assert.equal(f.status().state,'accepted',f.status().callbackError);
+  const state=f.read('observed-runtime'),phase=state.phases[0];
+  assert.equal(phase.status,scenario.expected);
+  assert.equal(state.executor_model,scenario.agent,'the declared agent survives native phase acceptance/provisional recording');
+  if(scenario.expected==='accepted'){
+   assert.equal(phase.executor_model,scenario.observed);assert.equal(phase.executor_family,'deepseek');assert.equal(phase.executor_agent,scenario.agent);assert.equal(phase.review_independence,'cross-family');
+  }else if(scenario.expected==='provisional'){
+   assert.equal(phase.executor_model,scenario.observed);assert.equal(phase.executor_family,'openai');assert.equal(phase.review_independence,'same-family');
+  }else{
+   assert.equal(phase.executor_model,scenario.agent);assert.equal(phase.executor_family,'unknown');
+   const progress=JSON.parse(readFileSync(join(f.project.root,'.aris/progress.json'),'utf8'));
+   assert.match(JSON.stringify(progress),/尚不能确认模型家族独立性/,'configured qwen cannot replace a missing runtime observation');
+  }
+  f.assertOld();
+ }
+ console.log('PASS workbench observed executor: DeepSeek/Codex accepted, GPT/Codex provisional, missing runtime observation unclassified despite configured model; original agent and old runs retained');
  {
   const f=await fixture('analyze-results');
   await native(['start',f.project.root,'current-skill','--phases','analysis','--executor','qwen']);

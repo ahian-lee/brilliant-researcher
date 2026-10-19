@@ -226,7 +226,8 @@ def set_status(root: str, run_id: str, phase: str, status: str, artifact: Option
         return state
 
 
-def accept(root: str, run_id: str, phase: str, verdict_id: str, reviewer: str, force: bool = False) -> dict:
+def accept(root: str, run_id: str, phase: str, verdict_id: str, reviewer: str,
+           force: bool = False, executor: Optional[str] = None) -> dict:
     """Mark a phase `accepted` — REQUIRES a recorded verdict id + reviewer, and
     (unless force) that the phase already be `done`.
 
@@ -236,6 +237,9 @@ def accept(root: str, run_id: str, phase: str, verdict_id: str, reviewer: str, f
 
     `verdict_id` should be a durable handle: the reviewer thread/trace id, or the
     path/sha of the verifier's report — not just a label.
+
+    `executor` may resolve a DSH agent label to its observed model, or repeat
+    the recorded model exactly. It cannot replace a different recorded model.
     """
     if not verdict_id or not reviewer:
         raise ValueError("accept requires a non-empty verdict_id AND reviewer — "
@@ -255,6 +259,18 @@ def accept(root: str, run_id: str, phase: str, verdict_id: str, reviewer: str, f
         # compatibility default rather than letting an absent value bless an
         # arbitrary reviewer as cross-family.
         executor_model = ph.get("executor_model") or state.get("executor_model") or "claude"
+        executor_agent = None
+        if executor is not None:
+            if not executor or model_family(executor) == "unknown":
+                raise ValueError(
+                    f"cannot classify acceptance families: observed executor={executor!r} (unknown)")
+            if executor != executor_model:
+                if executor_model.strip().lower() not in ("dsh", "dsh-pi"):
+                    raise ValueError(
+                        f"cannot override recorded executor model {executor_model!r} "
+                        f"with {executor!r}; only DSH agent labels may be resolved")
+                executor_agent = executor_model
+                executor_model = executor
         executor_family = model_family(executor_model)
         if reviewer_family != "deterministic":
             if executor_family == "unknown" or reviewer_family == "unknown":
@@ -275,6 +291,8 @@ def accept(root: str, run_id: str, phase: str, verdict_id: str, reviewer: str, f
         ph["acceptance_status"] = "accepted"
         ph["executor_model"] = executor_model
         ph["executor_family"] = executor_family
+        if executor_agent is not None:
+            ph["executor_agent"] = executor_agent
         ph["updated"] = _now()
         _save(root, run_id, state)
         return state
@@ -362,7 +380,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start"); s.add_argument("root"); s.add_argument("run_id"); s.add_argument("--phases", required=True, help="comma-separated phase names"); s.add_argument("--executor", default="claude"); s.add_argument("--provisional-advances", action="store_true", help="per-run policy: let a same-family provisional verdict close a phase for resume (Codex-native mirror only; mainline default keeps cross-family-only advance)")
     s = sub.add_parser("set"); s.add_argument("root"); s.add_argument("run_id"); s.add_argument("phase"); s.add_argument("status", choices=sorted(EXECUTOR_STATUSES)); s.add_argument("--artifact")
-    s = sub.add_parser("accept"); s.add_argument("root"); s.add_argument("run_id"); s.add_argument("phase"); s.add_argument("--verdict-id", required=True); s.add_argument("--reviewer", required=True); s.add_argument("--force", action="store_true")
+    s = sub.add_parser("accept"); s.add_argument("root"); s.add_argument("run_id"); s.add_argument("phase"); s.add_argument("--verdict-id", required=True); s.add_argument("--reviewer", required=True); s.add_argument("--force", action="store_true"); s.add_argument("--executor", help="observed model for a DSH agent label, or the unchanged recorded model")
     s = sub.add_parser("mark-provisional"); s.add_argument("root"); s.add_argument("run_id"); s.add_argument("phase"); s.add_argument("--verdict-id", required=True); s.add_argument("--reviewer", required=True); s.add_argument("--executor")
     s = sub.add_parser("resume"); s.add_argument("root"); s.add_argument("run_id")
     s = sub.add_parser("status"); s.add_argument("root"); s.add_argument("run_id")
@@ -375,7 +393,7 @@ def main() -> int:
         elif a.cmd == "set":
             _print_status(set_status(a.root, a.run_id, a.phase, a.status, a.artifact))
         elif a.cmd == "accept":
-            _print_status(accept(a.root, a.run_id, a.phase, a.verdict_id, a.reviewer, force=a.force))
+            _print_status(accept(a.root, a.run_id, a.phase, a.verdict_id, a.reviewer, force=a.force, executor=a.executor))
         elif a.cmd == "mark-provisional":
             _print_status(mark_provisional(a.root, a.run_id, a.phase, a.verdict_id, a.reviewer, executor=a.executor))
         elif a.cmd == "resume":

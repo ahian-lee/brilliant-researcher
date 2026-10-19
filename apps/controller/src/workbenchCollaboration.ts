@@ -97,7 +97,11 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
         if(Array.isArray(paths)&&paths.length&&paths.every(path=>!!fileArtifact(root,path))){await aris(workbench,['set',root,nativeId,phase.phase,'done','--artifact',paths[0]]);phase.artifact=paths[0];}
       }
       if(!fileArtifact(root,phase.artifact))continue;
-      try{await aris(workbench,['accept',root,nativeId,phase.phase,'--verdict-id',`collaboration/${run.id}/${reviewActionId}.json`,'--reviewer',reviewerModel]);accepted++;if(result==='pending')result='accepted';}
+      // DSH is an agent, not a model family. Fill that declaration from the
+      // actual native reply, never from a requested/configured model setting.
+      const observedExecutor=executor.runtimeModel?.trim();
+      const executorArgs=['dsh','dsh-pi'].includes(phase.executor_model??native.executor_model)&&observedExecutor?['--executor',observedExecutor]:[];
+      try{await aris(workbench,['accept',root,nativeId,phase.phase,'--verdict-id',`collaboration/${run.id}/${reviewActionId}.json`,'--reviewer',reviewerModel,...executorArgs]);accepted++;if(result==='pending')result='accepted';}
       catch(error){
         if(String(error).includes('cannot classify acceptance families'))result='unclassified';
         else{if(!String(error).includes('known same-family'))throw error;await aris(workbench,['mark-provisional',root,nativeId,phase.phase,'--verdict-id',`collaboration/${run.id}/${reviewActionId}.json`,'--reviewer',reviewerModel,'--executor',executorModel]);accepted++;if(result!=='unclassified')result='provisional';}
