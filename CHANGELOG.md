@@ -1,5 +1,13 @@
 # Changelog / 更新记录
 
+
+## Unreleased
+
+- Make native agent feedback consistent between the overview and conversation, including tool activity, context compaction, last text/event age, and independently timestamped status reads.
+- Surface provider quota/authentication failures and collaboration errors in actionable blockers; separate unreadable waiting states from answerable human requests.
+- Add read-only refresh timeouts, visible direction/pause controls and a jump-to-latest option that preserves the reading position. Keep project settings, budgets and exports in one disclosure.
+- Add bilingual feedback regression checks and browser verification of status, question answers, message submission, pause and observation timeout recovery without dispatching a live research task.
+
 ## 0.2.1 — 2026-10-20
 
 - Validated recovery on an existing Windows research project: original conversations, a real revision verdict, corrected delivery, final Codex acceptance and matching 3/3 native ARIS progress. A pre-submission compaction timeout required recovery between rounds; rejected sends and prior history were retained. / 已在已有 Windows 研究项目上验证恢复：原会话、真实退回意见、返修、Codex 最终接受及一致的 3/3 原生 ARIS 进度；轮次间发生提交前压缩超时并完成恢复，拒绝发送与原历史保留。

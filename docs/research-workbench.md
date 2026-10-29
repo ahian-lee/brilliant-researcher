@@ -87,3 +87,14 @@ Software checks in [tests](../tests) cover native interfaces, finite recovery, p
 Isolated tests, a browser preview, provider discovery and a successful build do not establish authentication, inference, complete ARIS workflow execution or scientific correctness. No claim is made that every skill or model has been validated. Private research material and raw sessions are excluded from the public release.
 
 Deployment and data boundaries are described in [Architecture](architecture.md) and [SECURITY.md](../SECURITY.md): the services are for localhost on a trusted machine; full access does not enlarge authorization; model calls may incur charges and send project content to configured providers.
+
+
+### Reading live agent feedback
+
+The overview and project conversation use the same native session feedback: the current tool or context compaction, the last recorded command/file, the latest text update, and the age of the last actual event. A separate timestamp shows when the dashboard last read the backend. A successful status read does not itself establish that the model is making progress.
+
+After 90 seconds without new output, the UI calls out the silence without marking the process stopped or restarting it. Refresh status only reads state; it never submits the task again. Reads time out after 20 seconds and retain the previous record and draft. Task submissions do not use that read timeout.
+
+Provider quota/authentication failures, collaboration failures and session errors appear with their original details and a route back to the conversation. Provider quota limits are separate from the project budget. A waiting status without a readable original question is shown as unverified, rather than counted as a question the user can answer. Actual questions open their original answer form. Contextual pause and direction controls reuse the existing collaboration endpoints. When reading older messages, new output no longer forces the conversation to scroll; use the new-message button to return to the latest message.
+
+Project settings, budget and export are grouped behind one disclosure so execution feedback remains visible. Chinese and English interfaces share the same status rules. These UI changes do not modify research data, credentials, permissions or existing conversations.

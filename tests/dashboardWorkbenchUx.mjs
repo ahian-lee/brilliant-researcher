@@ -31,7 +31,8 @@ try{
   assert.equal(summarizeAttention([human]).humanCount,1);
   assert.equal(summarizeAttention([{...automatic,approvals:[{...request,kind:'question'}]}]).humanCount,1);
   assert.equal(summarizeAttention([{...automatic,approvalReviews:[],approvalReviewStatus:{enabled:false}}]).humanCount,1);
-  assert.equal(summarizeAttention([{session:automatic.session,messages:[],approvals:[],error:'Unavailable'}]).humanCount,1);
+  assert.equal(summarizeAttention([{session:automatic.session,messages:[],approvals:[],error:'Unavailable'}]).humanCount,0,'An unreadable request is an observation problem, not an answerable human decision');
+  assert.equal(summarizeAttention([{session:automatic.session,messages:[],approvals:[],error:'Unavailable'}]).unknownCount,1);
   const original={maxDurationMs:90001,maxRevisions:3,maxTokens:1000};
   assert.deepEqual(budgetChanges({maxDurationMs:'1.5',maxRevisions:'4',maxTokens:'1000'},new Set(['maxRevisions']),original),{maxRevisions:4});
   assert.deepEqual(budgetChanges({maxTokens:'',maxCostUsd:'0'},new Set(['maxTokens','maxCostUsd']),original),{maxTokens:null,maxCostUsd:0});

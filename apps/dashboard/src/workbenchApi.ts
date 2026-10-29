@@ -19,16 +19,21 @@ import type {
 const BASE = '/api/workbench';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // Read timeouts only: aborting a write cannot prove it was not delivered.
+  const signal = init?.signal ?? (!init?.method || init.method === 'GET' ? AbortSignal.timeout(20_000) : undefined);
+  const readTimeout = '读取状态超时，已保留上次记录。可刷新状态；不会重新派发任务。';
   let response: Response;
   try {
     response = await fetch(`${BASE}${path}`, {
       ...init,
+      signal,
       headers: {
         accept: 'application/json',
         ...(init?.headers ?? {}),
       },
     });
   } catch {
+    if (signal?.aborted) throw new Error(readTimeout);
     throw new Error('无法连接项目工作台服务。连接恢复后可以重试。');
   }
 
@@ -36,6 +41,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     body = await response.json();
   } catch {
+    if (signal?.aborted) throw new Error(readTimeout);
     if (!response.ok) throw new Error(`${path} 返回 HTTP ${response.status}`);
     throw new Error(`${path} 返回了无法读取的响应`);
   }

@@ -10,7 +10,8 @@ import { projectState } from '../projectState';
 import { IterationResults } from './IterationResults';
 import { SessionMetadata } from './SessionMetadata';
 import { DirectionSync } from './DirectionSync';
-import { sessionProgress } from '../sessionProgress';
+import { sessionSignal } from '../sessionSignal';
+import { SessionPulse } from './SessionPulse';
 
 function stageStatus(status: string): string {
   const labels: Record<string, string> = { accepted: tr("已验收"), done: tr("执行结束 · 待审核"), provisional: tr("暂定结果 · 待审核"), completed: tr("执行已结束"), succeeded: tr("执行已结束"), running: tr("进行中"), waiting_input: tr("待答复"), blocked: tr("受阻"), failed: tr("执行失败"), skipped: tr("已跳过"), not_started: tr("未开始"), pending: tr("待推进"), queued: tr("排队中"), unknown: tr("尚未记录") };
@@ -32,7 +33,7 @@ export function IterationPlan({ run }: { run: WorkbenchCollaborationRun | null |
   </section>;
 }
 
-export function ProjectOverview({project,focus,continuation,sessions,attention,now,onOpenSession,onOpenRequests,onIterate,collaboration,projectId,error}: {
+export function ProjectOverview({project,focus,continuation,sessions,attention,now,onOpenSession,onOpenRequests,onIterate,collaboration,projectId,error,onRefresh}: {
   projectId?:string;error?:string;project:Project|null;focus:Overview['focus'];sessions:WorkbenchSession[];
   continuation?:ProjectContinuation;now:number;
   collaboration?:WorkbenchCollaborationRun|null;
@@ -41,24 +42,20 @@ export function ProjectOverview({project,focus,continuation,sessions,attention,n
 }): JSX.Element {
   const { t: tr, locale } = useI18n();
   const pending=attention.data?.pending??[];
-  const {humanDetails,humanCount,automaticCount}=summarizeAttention(pending,focus?.questions.length??0);
+  const {humanDetails,humanCount,automaticCount,unresolvedDetails}=summarizeAttention(pending,focus?.questions.length??0);
   const blockers=[...(focus?.blockers??[])];
+  for(const row of unresolvedDetails)blockers.push({id:`unresolved-${row.session?.id}`,session_id:row.session?.id,title:tr('等待原因需要核实'),detail:row.error||tr('执行端报告等待，但尚未返回具体请求。'),source:row.session?.title||tr('执行后台')});
   for(const row of humanDetails) blockers.push({id:`live-${row.session?.id}`,session_id:row.session?.id,title:row.approvals?.some(p=>p.kind==='question')?tr("会话等待回答"):tr("会话有操作待处理"),detail:row.error || row.approvalReviews?.filter(r=>['human_required','unknown'].includes(r.state)).at(-1)?.reason || row.approvals?.[0]?.description || tr("执行端报告等待，但尚未返回具体请求。"),source:row.session?.title || tr("执行后台")});
   const agents=sessions.map(session=>{
     const observation=attention.data?.observations?.find(o=>o.session?.id===session.id);
-    const activity=observation?.activity??[];
-    const recent=activity.at(-1);
-    const status=observation?.session?.status || session.status;
-    const idle=status==='idle';
-    const active=['running','starting'].includes(status) ? [...activity].reverse().find(item=>['running','pending','in_progress'].includes(item.status||'')) : undefined;
-    const {generating,latestAt}=sessionProgress({...session,...observation?.session},observation?.messages??[],activity);
-    // Silence after a finished tool is an observation, not evidence of completion or a dead process.
-    const quiet=status==='running' && !active && !generating && !!latestAt && now-latestAt>=90_000 && ['completed','failed'].includes(recent?.status || '');
-    const label=generating ? tr('正在生成回复') : quiet ? tr("暂无新活动 · 等待确认") : idle ? tr("当前闲置") : ['completed','succeeded','done'].includes(status) ? tr("本轮执行已结束") : sessionStatus(status);
-    return {session,observation,activity,recent,status,idle,active,generating,latestAt,quiet,label};
+    const signal=sessionSignal(session,observation,now);
+    return {session,observation,...signal,status:signal.current.status};
   });
-  const running=agents.some(agent=>['running','starting'].includes(agent.status) && !agent.quiet);
-  const quiet=agents.some(agent=>agent.quiet) && !running;
+  const running=agents.some(agent=>agent.busy&&!agent.observation?.error&&!attention.error);
+  const quiet=agents.some(agent=>agent.quiet) && !agents.some(agent=>agent.busy&&!agent.quiet);
+  const collaborationProblem=['needs_attention','budget_exhausted'].includes(collaboration?.state||'') ? collaboration?.reason || collaboration?.error : undefined;
+  if(collaborationProblem && !blockers.some(item=>item.detail===collaborationProblem))blockers.push({id:'collaboration-problem',title:collaboration?.state==='budget_exhausted'?tr('项目预算已用尽'):tr('本轮协作未能继续'),detail:collaborationProblem,source:tr('自动协作'),session_id:collaboration?.executorSessionId});
+  for(const agent of agents)if(['error','failed','interrupted'].includes(agent.status)&&agent.current.error&&!blockers.some(item=>item.detail===agent.current.error))blockers.push({id:`session-error-${agent.session.id}`,title:tr('会话执行需要处理'),detail:agent.current.error,source:agent.session.title,session_id:agent.session.id});
   const state=projectState({run:collaboration,continuation,humanCount,automaticCount,error:error||attention.error?.message,running,quiet});
   const stages=focus?.stages??[];
   const affected=new Set(continuation?.state!=='completed' ? continuation?.affectedStages??[] : []);
@@ -69,12 +66,20 @@ export function ProjectOverview({project,focus,continuation,sessions,attention,n
   const current=stages.filter(stage=>reopened(stage) || ['running','blocked','failed','waiting_input'].includes(stage.status));
   return <div className="wb-unified-overview" data-testid="project-overview">
     <section className="wb-card wb-project-summary"><div className="wb-section-heading"><div><span className="wb-eyebrow">{tr("当前项目")}</span><h1>{project?.name || tr("项目进展")}</h1></div><span className={`wb-status${quiet || continuation?.state==='idle' ? ' is-idle' : ''}`} data-state={state.key}>{tr(state.label)}</span></div>
+      {humanCount?<button type="button" className="wb-pending-banner" onClick={onOpenRequests}>{tr('有 {0} 项需要你答复，点击查看原问题',{0:humanCount})}</button>:null}
       <p className="wb-current-step"><strong>{tr('当前步骤')}：</strong>{continuation?.activeStage ? tr(stages.find(stage=>stage.id===continuation.activeStage)?.label || continuation.activeStage) : current.length ? current.map(stage=>tr(stage.label)).join(', ') : tr(state.label)}</p>
-      <ResearchSummary focus={focus} goal={project?.goal} continuation={continuation}/>
       {state.reason && state.reason!==continuation?.reason ? <p className={state.key==='error'?'wb-error':'wb-muted'} role={state.key==='error'?'alert':'status'}>{state.reason}</p> : null}
-      {projectId ? <IterationResults projectId={projectId} run={collaboration}/> : null}
       {collaboration ? <DirectionSync run={collaboration} affectedStages={continuation?.affectedStages?.map(id=>stages.find(stage=>stage.id===id)?.label||id)}/> : null}
       <small className="wb-muted">{tr("研究摘要：")}{focus?.updated_at ? new Date(focus.updated_at).toLocaleString(locale) : tr("尚未更新")}  {tr("· 会话状态：")}{attention.lastOkAt ? new Date(attention.lastOkAt).toLocaleTimeString(locale) : tr("读取中")}</small>
+    </section>
+    <section className="wb-card wb-live-agents" aria-label={tr("Agent 正在做什么")}><div className="wb-section-heading"><div><span className="wb-eyebrow">{tr('实时执行反馈')}</span><h2>{tr("Agent 正在做什么")}</h2></div><span className="wb-muted">{sessions.length} {tr("个工作会话")}</span></div>
+      <div className="wb-agent-work-list">{agents.map(({session,observation})=>{
+        const role=collaboration?.state==='planning'&&session.id===collaboration.reviewerSessionId?tr('审计规划'):session.delegation?tr('子任务'):session.role==='reviewer'?tr('审核'):tr('执行');
+        return <article key={session.id} className="wb-agent-work"><div className="wb-section-heading"><strong>{session.provider==='dsh-pi'?'DSH':session.provider==='codex'?'Codex':session.provider} · {role}</strong><button type="button" className="wb-text-button" onClick={()=>onOpenSession(session.id)}>{tr('打开会话 →')}</button></div>
+          <SessionPulse session={session} detail={observation} now={now} observedAt={attention.lastOkAt} readError={attention.error?.message} refreshing={attention.loading} onRefresh={onRefresh} onRequests={onOpenRequests} onConversation={()=>onOpenSession(session.id)}/>
+          <details className="wb-agent-metadata"><summary>{tr('会话归属与用量')}</summary><SessionMetadata session={{...session,...observation?.session}} sessions={sessions} onOpenSession={onOpenSession}/></details>
+        </article>;
+      })}</div>{!sessions.length?<p className="wb-muted">{tr('尚无工作会话，可在右侧创建。')}</p>:null}
     </section>
     <IterationPlan run={collaboration} />
     <section className="wb-card wb-research-progress" aria-label={tr("研究阶段进度")} data-testid="research-progress"><div className="wb-section-heading"><h2>{tr("研究阶段")}</h2>{onIterate ? <button type="button" className="wb-button" onClick={onIterate}>{tr("继续迭代 / 重做")}</button> : null}<span className="wb-muted">{total ? tr("当前已验收 {0} / {1}", { 0: accepted, 1: total }) : tr("等待阶段记录")}</span></div>
@@ -82,25 +87,12 @@ export function ProjectOverview({project,focus,continuation,sessions,attention,n
         const reopen=reopened(stage);
         const unconfirmed=!reopen && stage.status==='running' && !running;
         const activeReopen=!continuation?.activeStage||continuation.activeStage===stage.id||continuation.activeStage===stage.label;
-        const status=reopen && collaboration?.state==='planning' ? 'pending' : reopen && !activeReopen ? stage.status==='done'?'done':'pending' : reopen ? continuation?.state==='blocked' ? 'blocked' : continuation?.state==='idle' || quiet ? 'idle' : 'running' : unconfirmed ? 'idle' : stage.status;
-        const label=reopen && collaboration?.state==='planning' ? tr("等待 Codex 审计计划") : reopen && !activeReopen ? stage.status==='done'?tr("执行结束 · 待本轮审核"):tr("本轮待推进") : reopen ? status==='running' ? tr("重新推进中") : status==='blocked' ? tr("重新推进 · 待处理") : quiet ? tr("重新推进 · 等待进展确认") : tr("重新推进 · 待继续") : unconfirmed ? tr("记录进行中 · 待确认") : stageStatus(stage.status);
+        const status=reopen && collaboration?.state==='planning' ? 'pending' : reopen && !activeReopen ? stage.status==='done'?'done':'pending' : reopen ? continuation?.state==='blocked' ? 'blocked' : continuation?.state==='idle' && !running ? 'idle' : 'running' : unconfirmed ? 'idle' : stage.status;
+        const label=reopen && collaboration?.state==='planning' ? tr("等待 Codex 审计计划") : reopen && !activeReopen ? stage.status==='done'?tr("执行结束 · 待本轮审核"):tr("本轮待推进") : reopen ? status==='running' ? quiet ? tr("重新推进 · 等待进展确认") : tr("重新推进中") : status==='blocked' ? tr("重新推进 · 待处理") : quiet ? tr("重新推进 · 等待进展确认") : tr("重新推进 · 待继续") : unconfirmed ? tr("记录进行中 · 待确认") : stageStatus(stage.status);
         return <li key={stage.id} className={`wb-research-stage is-${status}${reopen?' is-reopened':''}`} aria-current={status==='running'?'step':undefined}><span className="wb-research-stage-number">{stage.status==='accepted' && !reopen?'✓':index+1}</span><div><strong>{tr(stage.label)}</strong><span>{tr(label)}</span>{reopen ? <small>{tr("原记录：")}{stageStatus(stage.status)}</small> : null}</div></li>;
       })}</ol><p className="wb-progress-caption">{current.length ? tr("当前关注：{0}。", { 0: current.map(stage=>tr(stage.label)).join(locale === 'zh-CN' ? '、' : ', ') }) : accepted===total && total>0 ? tr("本轮阶段已验收，仍可继续迭代或指定阶段重做。") : tr("执行结束的阶段仍需确认验收。")}{affected.size ? tr(" 本轮调整涉及的阶段已重新列入进度，原验收记录保留。") : tr(" 执行结束与阶段验收分别记录。")}</p></> : <p className="wb-muted">{tr("尚未登记研究阶段，执行活动会显示在下方。")}</p>}
     </section>
-    <section className="wb-card" aria-label={tr("Agent 正在做什么")}><div className="wb-section-heading"><h2>{tr("Agent 正在做什么")}</h2><span className="wb-muted">{sessions.length}  {tr("个工作会话")}</span></div>
-      <div className="wb-agent-work-list">{agents.map(({session,observation,activity,recent,idle,active,generating,latestAt,quiet,label})=>{
-        const role=collaboration?.state==='planning' && session.id===collaboration.reviewerSessionId ? tr("审计规划") : session.role==='reviewer'?tr("审核"):tr("执行");
-        return <article key={session.id} className="wb-agent-work"><div className="wb-section-heading"><strong>{session.provider==='dsh-pi'?'DSH':session.provider==='codex'?'Codex':session.provider} · {tr(role)}</strong><span className={`wb-status${idle || quiet?' is-idle':''}`}>{tr(label)}</span></div>
-          <p className="wb-agent-current">{observation?.error ? tr("状态读取失败：{0}", { 0: observation.error }) : generating ? tr("正在生成回复") : quiet ? tr("最近工具已结束，超过 90 秒没有新消息或工具活动，正在等待进展确认。") : active ? tr("正在{0}", { 0: active.summary }) : recent ? tr("{0}：{1}", { 0: idle?tr('本轮最后操作'):tr('最近操作'), 1: recent.summary }) : idle ? session.role==='reviewer'?tr("当前闲置，等待成果交接或下一条任务。"):tr("当前没有运行中的操作，可继续发送任务。") : tr("等待执行端返回新的活动记录。")}</p>
-          {latestAt ? <small className="wb-muted">{tr("最近活动")} <time dateTime={new Date(latestAt).toISOString()}>{new Date(latestAt).toLocaleTimeString(locale)}</time> · {generating?tr('正在生成回复'):recent?.status==='completed'?tr("该工具操作已结束，不代表整个任务完成"):recent?.status==='failed'?tr("该工具操作失败"):tr("状态以执行端返回为准")}</small> : null}
-          {recent?.error ? <p className="wb-error">{tr("最近工具返回：")}{recent.error}</p> : null}
-          <SessionMetadata session={{...session,...observation?.session}} sessions={sessions} onOpenSession={onOpenSession}/>
-          <ol className="wb-agent-recent">{activity.slice(-3).reverse().map(item=><li key={item.id}><span>{item.summary}</span>{item.target ? <small title={item.target}>{item.target}</small> : null}</li>)}</ol>
-          <button type="button" className="wb-text-button" onClick={()=>onOpenSession(session.id)}>{tr("查看动态、对话与待处理事项 →")}</button>
-        </article>;
-      })}</div>
-      {!sessions.length ? <p className="wb-muted">{tr("尚无工作会话，可在右侧创建。")}</p> : null}
-    </section>
+    <section className="wb-card wb-current-results" aria-label={tr('当前研究成果')}><ResearchSummary focus={focus} goal={project?.goal} continuation={continuation}/>{projectId?<IterationResults projectId={projectId} run={collaboration}/>:null}</section>
     <section className="wb-card wb-unified-blockers" aria-label={tr("卡住的地方")}><div className="wb-section-heading"><h2>{tr("卡住的地方")}</h2><span className="wb-status">{blockers.length}  {tr("项")}</span></div>
       {!attention.data && attention.loading ? <p>{tr("正在读取实时状态…")}</p> : null}
       {attention.error ? <p className="wb-error">{tr("实时状态读取失败：")}{attention.error.message}{tr("。不能据此认定没有阻塞。")}</p> : null}

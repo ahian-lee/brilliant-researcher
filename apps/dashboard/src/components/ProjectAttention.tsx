@@ -39,13 +39,14 @@ export function ProjectAttention({ projectId, sessions, questions, onOpenSession
   const { t: tr, locale } = useI18n();
   const pending = state.data?.pending ?? [];
   const history = [...(state.data?.recent ?? [])].filter(item => !pending.some(detail => detail.session?.id === item.session.id && detail.approvals?.some(approval => approval.id === item.review.approvalId))).sort((a, b) => (b.review.updatedAt ?? 0) - (a.review.updatedAt ?? 0));
-  const {humanDetails,automaticDetails,humanCount,automaticCount}=summarizeAttention(pending,questions.length);
+  const {humanDetails,automaticDetails,humanCount,automaticCount,unresolvedDetails}=summarizeAttention(pending,questions.length);
   const count=humanCount+automaticCount;
   if (!state.data && state.loading) return <p className="wb-muted" role="status">{tr("正在读取实时待办…")}</p>;
-  if (!count && !history.length && !answeredQuestions.length && !state.error) return <p className="wb-muted">{tr("当前没有等待你回答或批准的请求。执行进度请看概览。")}</p>;
+  if (!count && !unresolvedDetails.length && !history.length && !answeredQuestions.length && !state.error) return <p className="wb-muted">{tr("当前没有等待你回答或批准的请求。执行进度请看概览。")}</p>;
   return <section className="wb-attention" aria-label={tr("需要你处理")}><div className="wb-section-heading"><h2>{humanCount ? tr("需要你处理 · {0}", { 0: humanCount }) : count ? tr("自动审核中 · {0}", { 0: count }) : tr("最近处理记录")}</h2><span className="wb-muted">{tr("操作权限 · Agent 提问 · 项目决定")}</span></div>
-    {!count ? <p className="wb-muted">{tr("当前无需你批准或回答。下面保留最近处理结果。")}</p> : null}
+    {!count && !unresolvedDetails.length && !state.error ? <p className="wb-muted">{tr("当前无需你批准或回答。下面保留最近处理结果。")}</p> : null}
     {state.error ? <p className="wb-error" role="alert">{tr("待办读取失败：")}{state.error.message}{tr("。当前列表可能不完整。")}</p> : null}
+    {unresolvedDetails.map(detail=><article key={`unresolved-${detail.session?.id}`} className="wb-blocker-item"><strong>{tr('等待原因需要核实')}</strong><p>{detail.error||tr('执行端报告等待，但尚未返回具体请求。')}</p><p className="wb-muted">{tr('尚无可提交的原问题，不需要猜测答复。先刷新状态或查看来源会话。')}</p><button type="button" className="wb-button" onClick={onRefresh}>{tr('刷新状态')}</button>{detail.session?<button type="button" className="wb-text-button" onClick={()=>onOpenSession(detail.session!.id)}>{tr('打开来源对话 ↗')}</button>:null}</article>)}
     {humanDetails.map(detail => detail.session ? <div key={detail.session.id} className="wb-attention-session"><div className="wb-section-heading"><strong>{detail.session.title}</strong><button type="button" className="wb-text-button" onClick={() => onOpenSession(detail.session!.id)}>{tr("打开来源对话 ↗")}</button></div><p className="wb-muted">{detail.session.provider}</p>
       {detail.error ? <p className="wb-error">{tr("此会话正在等你处理，但具体请求读取失败：")}{detail.error}</p> : null}
       {detail.approvals?.map(approval => <ApprovalCard key={approval.id} projectId={projectId} sessionId={detail.session!.id} approval={approval} review={detail.approvalReviews?.find(review => review.approvalId === approval.id)} onHandled={onRefresh} />)}

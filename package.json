@@ -27,7 +27,7 @@
     "test:compat": "node tests/paseoRuntime.ts",
     "prepare:aris-dashboard": "node integrations/prepare-aris-dashboard.mjs",
     "audit:release": "node scripts/audit-release.mjs",
-    "test:i18n": "node tests/dashboardI18n.mjs && node tests/dashboardWorkbenchUx.mjs",
+    "test:i18n": "node tests/dashboardI18n.mjs && node tests/dashboardWorkbenchUx.mjs && node tests/sessionFeedbackUx.mjs",
     "connect": "node scripts/connect.mjs",
     "doctor": "node scripts/doctor.mjs",
     "typecheck:backend": "tsc --noEmit --allowImportingTsExtensions --module nodenext --target es2023 --skipLibCheck packages/core/src/researchWorkbench.ts packages/core/src/collaborationLoop.ts packages/adapters/src/nativeRuntime.ts apps/controller/src/workbenchCollaboration.ts apps/controller/src/workbenchRoutes.ts runner/native-runtime-host.ts"

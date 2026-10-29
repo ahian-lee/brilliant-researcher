@@ -4,7 +4,10 @@ import { configureWorkbenchSession, createWorkbenchSession, fetchWorkbenchSessio
 import { summarizeAttention } from '../attention';
 import { SessionMetadata } from './SessionMetadata';
 import { DirectionSync } from './DirectionSync';
-import { ReplyProgress, sessionProgress } from '../sessionProgress';
+import { SessionPulse } from './SessionPulse';
+import { useNow } from '../hooks/useNow';
+import { activityLabel } from '../sessionSignal';
+import { pauseWorkbenchCollaboration } from '../workbenchApi';
 import { ProjectAttention } from './ProjectAttention';
 import type { Async } from '../hooks/useAsync';
 import type { fetchWorkbenchAttention } from '../workbenchApi';
@@ -107,6 +110,9 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
   const sending = useRef(false);
   const active = useRef(true);
   const end = useRef<HTMLDivElement>(null);
+  const body = useRef<HTMLDivElement>(null);
+  const follow = useRef(true);
+  const [unread, setUnread] = useState(false);
   const state = useAsync(() => fetchWorkbenchSession(projectId, sessionId), [projectId, sessionId, revision], { resetKey: `${projectId}:${sessionId}`, pollMs: 2500 });
   useEffect(() => {
     active.current = true;
@@ -125,14 +131,16 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
   const canSend = (!!text.trim() || canPlan && auditFirst && !!iterationRequest?.key) && !reviewerMissing && !repairBusy && !pending && !configBusy && !action && !!currentSession && currentSession.status !== 'archived';
   const canHandoff = !!handoff && !!target && !!handoffInstruction.trim() && !pending && !configBusy && !action;
   const approvals = state.data?.approvals ?? [];
-  const {humanCount:sessionHumanCount,automaticCount:sessionAutomaticCount}=summarizeAttention(state.data?[state.data]:[],0);
-  const generating = currentSession ? sessionProgress(currentSession,messages,state.data?.activity).generating : false;
-  const waitingLabel = sessionHumanCount && approvals.length ? tr('需要你处理') : sessionAutomaticCount ? tr('自动审核操作权限中') : generating ? tr('正在生成回复') : sessionStatus(currentSession?.status);
+  const now = useNow();
 
   const loopActive = bound && !['paused', 'accepted', 'audited', 'budget_exhausted', 'needs_attention'].includes(collaboration!.state);
   const canConfigure = !loopActive && !!currentSession && ['idle', 'stopped', 'completed', 'succeeded', 'failed', 'error', 'canceled', 'interrupted'].includes(currentSession.status) && !approvals.length && !pending && !action;
   const configBlockedReason = loopActive ? collaboration?.state === 'planning' ? tr("Codex 正在审计规划，请先暂停协作再更换模型。") : tr("请先暂停自动协作，再更换模型。") : approvals.length || ['starting', 'queued', 'running', 'waiting_input', 'waiting'].includes(currentSession?.status || '') ? tr("当前回合正在运行或等待审批，请先结束当前回合后调整。") : pending || action ? tr("请等待当前操作结束后调整。") : tr("当前会话状态尚未确认空闲，暂不能保存配置。");
-  useEffect(() => { if (!approvals.length) end.current?.scrollIntoView({ block: 'nearest' }); }, [lastMessage?.id, lastMessage?.text, approvals.length]);
+  useEffect(() => {
+    if(panel!=='chat'||approvals.length||!body.current)return;
+    if(follow.current)body.current.scrollTop=body.current.scrollHeight;
+    else setUnread(true);
+  }, [lastMessage?.id,lastMessage?.text,approvals.length,panel]);
   const submit = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
     const message = text.trim();
@@ -170,27 +178,28 @@ function ChatConversation({ projectId, sessionId, sessions, onNewSession, collab
     try {
       const result = await operation();
       if (!result.ok) throw new Error(result.error || tr("操作未成功。"));
-      if (active.current) { setNotice(message); setRevision((n) => n + 1); }
+      if (active.current) { setNotice(message); setRevision((n) => n + 1); onCollaborationChanged?.(); }
     } catch (err) { if (active.current) setError(err instanceof Error ? err.message : String(err)); }
     finally { if (active.current) setAction(''); }
   };
   return <>
     <div className="wb-chat-tabs" role="tablist" aria-label={tr("会话内容")}>{([['activity',tr("动态")],['chat',tr("对话")],['requests',tr("待处理{0}", { 0: requestCount ? ` · ${requestCount}` : '' })]] as const).map(([id,label])=><button key={id} type="button" role="tab" aria-selected={panel===id} onClick={()=>setPanel(id)}>{tr(label)}</button>)}</div>
     {(requestCount)>0 && panel!=='requests' ? <button type="button" className="wb-pending-banner" onClick={()=>setPanel('requests')}>{requestCount}  {tr("项需要查看 · 点击回答或处理 →")}</button> : null}
-    <div className="wb-chat-body" data-testid="session-content">
-    <div className="wb-chat-status"><strong>{waitingLabel}</strong><span>{currentSession?.provider==='dsh-pi'?'DSH':currentSession?.provider==='codex'?'Codex':currentSession?.provider}</span></div>
-    {currentSession ? <ReplyProgress session={currentSession} messages={messages} activity={state.data?.activity}/> : null}
+    <div className="wb-chat-body" data-testid="session-content" ref={body} onScroll={event=>{const el=event.currentTarget;follow.current=el.scrollHeight-el.scrollTop-el.clientHeight<90;if(follow.current)setUnread(false);}}>
+    {currentSession?<SessionPulse session={currentSession} detail={state.data??undefined} now={now} observedAt={state.lastOkAt} readError={state.error?.message} refreshing={state.loading} onRefresh={()=>{setRevision(n=>n+1);onCollaborationChanged?.();}} onRequests={()=>setPanel('requests')} onConversation={()=>{setPanel('chat');document.getElementById('chat-message')?.focus();}} onConfigure={canConfigure?()=>{setConfigOpen(true);setTimeout(()=>body.current?.querySelector('.wb-model-panel')?.scrollIntoView({block:'nearest'}),0);}:undefined}/>:null}
+    <div className="wb-session-controls"><button className="wb-text-button" type="button" onClick={()=>{setPanel('chat');document.getElementById('chat-message')?.focus();}}>{tr('补充要求 / 改方向')}</button>{loopActive?<button type="button" className="wb-text-button" disabled={!!action||pending||collaboration?.state==='stopping'} onClick={()=>void runAction('pause',()=>pauseWorkbenchCollaboration(projectId).then(()=>({ok:true})),'已请求暂停协作，正在等待执行端停止确认。')}>{action==='pause'?tr('正在请求…'):tr('暂停协作')}</button>:!bound&&['running','starting','waiting_input'].includes(currentSession?.status||'')?<button type="button" className="wb-text-button" disabled={!!action||pending} onClick={()=>void runAction('interrupt',()=>interruptWorkbenchSession(projectId,sessionId),'已请求停止当前回合。')}>{tr('停止当前会话')}</button>:null}</div>
     {automaticCount && !requestCount ? <p className="wb-muted" role="status">{tr('自动审核进行中 · {0}',{0:automaticCount})} · {tr('当前无需你批准。')}</p> : null}
     {currentSession?<details className="wb-chat-session-meta"><summary>{tr('会话归属与用量')}</summary><SessionMetadata session={currentSession} sessions={sessions} onOpenSession={onOpenSession}/></details>:null}
     {bound && collaboration?<DirectionSync run={collaboration}/>:null}
     <p className="wb-chat-collaboration">{bound ? tr("消息会同步执行与审核会话。") : tr("消息发送给当前选择的会话。")}{currentSession?.permissionPreset==='danger-full-access'||currentSession?.modeId==='full-access' ? tr(" 项目范围内自主执行。") : ''}</p>
-    {panel==='activity' ? <section className="wb-activity-feed" aria-label={tr("当前会话动态")}><h3>{tr("最近在做什么")}</h3>{(state.data?.activity??[]).length ? <ol>{[...(state.data?.activity??[])].reverse().map(item=><li key={item.id}><div><strong>{item.summary}</strong><span>{item.status==='completed'?tr("操作已结束"):item.status==='failed'?tr("操作失败"):['running','in_progress','pending'].includes(item.status||'')?tr("正在执行"):tr("已记录")}</span></div>{item.at ? <time>{new Date(item.at).toLocaleTimeString(locale)}</time> : null}{item.target ? <p className="wb-activity-target">{item.target}</p> : null}{item.error ? <p className="wb-error">{item.error}</p> : null}{item.description && item.description!==item.summary ? <details><summary>{tr("执行者的原始说明")}</summary><p>{item.description}</p></details> : null}</li>)}</ol> : <p className="wb-muted">{state.loading?tr("正在读取最近活动…"):currentSession?.status==='idle'?tr("此会话当前没有正在执行的操作。"):tr("会话运行中，执行端尚未提供工具活动。")}</p>}{lastAssistant ? <details><summary>{tr("最近一次文字汇报")}</summary><ChatMessage message={lastAssistant}/></details> : null}</section> : null}
+    {panel==='activity' ? <section className="wb-activity-feed" aria-label={tr("当前会话动态")}><h3>{tr("最近在做什么")}</h3>{(state.data?.activity??[]).length ? <ol>{[...(state.data?.activity??[])].reverse().map(item=><li key={item.id}><div><strong>{tr(activityLabel(item))}</strong><span>{item.status==='completed'?tr("操作已结束"):item.status==='failed'?tr("操作失败"):['running','in_progress','pending'].includes(item.status||'')?tr("正在执行"):tr("已记录")}</span></div>{item.at ? <time>{new Date(item.at).toLocaleTimeString(locale)}</time> : null}<p className="wb-activity-target">{item.target || item.summary}</p>{item.error ? <p className="wb-error">{item.error}</p> : null}{item.description && item.description!==item.summary ? <details><summary>{tr("执行者的原始说明")}</summary><p>{item.description}</p></details> : null}</li>)}</ol> : <p className="wb-muted">{state.loading?tr("正在读取最近活动…"):currentSession?.status==='idle'?tr("此会话当前没有正在执行的操作。"):tr("会话运行中，执行端尚未提供工具活动。")}</p>}{lastAssistant ? <details><summary>{tr("最近一次文字汇报")}</summary><ChatMessage message={lastAssistant}/></details> : null}</section> : null}
     {panel==='chat' ? <div className="wb-chat-messages" aria-label={tr("会话消息")}>{messages.filter(message=>message.text.trim()).map(message=>{const automatic=collaboration?.actions.find(action=>action.prompt&&message.text.endsWith(action.prompt));return <ChatMessage key={message.id} message={message} automatic={automatic ? automatic.kind==='plan'?tr("Codex 审计规划任务"):automatic.kind==='sync'?tr("同步项目调整"):automatic.kind==='review'?tr("发起独立审核"):tr("派发执行任务"):undefined}/>;})}{!messages.some(message=>message.text.trim()) ? <p className="wb-muted">{tr("尚无文字消息，可以在下方发送任务。")}</p> : null}<div ref={end}/></div> : null}
     {panel==='requests' ? <section className="wb-inline-requests" aria-label={tr("项目待处理请求")}><ProjectAttention projectId={projectId} sessions={sessions} questions={questions} runId={focus?.pipeline_run_id??null} answeredQuestions={focus?.answeredQuestions} state={attention} onOpenSession={id=>{onOpenSession(id);setPanel('chat');}} onRefresh={()=>{setRevision(n=>n+1);onCollaborationChanged?.();}}/></section> : null}
     {currentSession ? <details className="wb-model-panel" open={configOpen} onToggle={(event) => setConfigOpen(event.currentTarget.open)}><summary onClick={(event) => { if (configBusy) event.preventDefault(); }}>{tr("模型与思考")}</summary>{configOpen ? <SessionConfiguration key={`${projectId}:${sessionId}`} projectId={projectId} session={currentSession} editable={canConfigure} blockedReason={configBlockedReason} onBusyChange={setConfigBusy} onSaved={() => setRevision((n) => n + 1)} /> : null}</details> : null}
     <details className="wb-chat-more"><summary>{tr("更多操作")}</summary><button type="button" className="wb-text-button" disabled={bound || pending || !!action} onClick={()=>void runAction('interrupt',()=>interruptWorkbenchSession(projectId,sessionId),'已请求停止当前回合。')}>{tr("停止当前会话")}</button><button type="button" className="wb-text-button" disabled={bound || !lastAssistant || pending} onClick={()=>{if(lastAssistant){setHandoff({id:lastAssistant.id,text:lastAssistant.text});setTargetId('');setHandoffInstruction('');}}}>{tr("手动交接给其他会话")}</button>{bound ? <p>{tr("自动协作会统一处理暂停和交接。")}</p> : null}<button className="wb-text-button" type="button" onClick={onNewSession}>{tr("新建工作会话")}</button></details>
-    {state.error || state.data?.error || error ? <p className="wb-error" role="alert">{error || state.data?.error || state.error?.message}</p> : null}{notice ? <p className="wb-notice" role="status">{tr(notice)}</p> : null}
+    {error ? <p className="wb-error" role="alert">{error}</p> : null}{notice ? <p className="wb-notice" role="status">{tr(notice)}</p> : null}
     </div>
+    {unread&&panel==='chat'?<button type="button" className="wb-new-message" onClick={()=>{follow.current=true;setUnread(false);if(body.current)body.current.scrollTop=body.current.scrollHeight;}}>{tr('有新消息 · 回到底部 ↓')}</button>:null}
     {reviewerMissing?<section className="wb-reviewer-repair" role="alert"><p>{tr('阶段重做需要独立审核会话，请先修复审核连接。')}</p><p className="wb-muted">{tr('已保留所选阶段与草稿。创建空闲审核会话不会启动模型；完成后再发送本轮要求。')}</p><button type="button" className="wb-button" disabled={repairBusy||pending} onClick={()=>{
       if(repairBusy)return;setRepairBusy(true);setError('');
       createWorkbenchSession(projectId,{provider:'codex',role:'reviewer',workflow:'free',idle:true}).then(result=>{

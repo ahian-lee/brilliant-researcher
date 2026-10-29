@@ -94,6 +94,8 @@ export interface WorkbenchSession {
   modeId?: string | null;
   updatedAt?: string | null;
   lastMessageAt?: string | null;
+  lastActivityAt?: string | null;
+  native?: { compactionPending?: boolean; collaborationRecoveryPending?: boolean };
   role?: 'executor' | 'reviewer' | string;
   delegation?: {parentSessionId?: string; collaborationId?: string; actionId?: string; revision?: number; task?: string};
   usage?: WorkbenchUsage;
@@ -220,6 +222,7 @@ export interface WorkbenchReview {
 }
 
 export interface WorkbenchSessionDetail {
+  activeTurn?: { kind?: string; status?: string } | null;
   activity?: Array<{ id: string; tool: string; summary: string; status?: string; target?: string; description?: string; error?: string; at?: string }>;
   session?: WorkbenchSession;
   messages: WorkbenchMessage[];
