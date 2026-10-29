@@ -98,3 +98,10 @@ After 90 seconds without new output, the UI calls out the silence without markin
 Provider quota/authentication failures, collaboration failures and session errors appear with their original details and a route back to the conversation. Provider quota limits are separate from the project budget. A waiting status without a readable original question is shown as unverified, rather than counted as a question the user can answer. Actual questions open their original answer form. Contextual pause and direction controls reuse the existing collaboration endpoints. When reading older messages, new output no longer forces the conversation to scroll; use the new-message button to return to the latest message.
 
 Project settings, budget and export are grouped behind one disclosure so execution feedback remains visible. Chinese and English interfaces share the same status rules. These UI changes do not modify research data, credentials, permissions or existing conversations.
+
+
+### Progress polling and memory
+
+The dashboard requests `/api/overview?summary=1` for ARIS progress. It preserves the project, stage states, blockers, questions and review state, while omitting repeated historical task/report bodies and decision lists. HTTP overviews also default to this projection so existing open pages stop requesting large responses. An explicit `summary=0` requests the full overview; result/run reads remain available on demand. Internal callers that only need research focus use the same projection.
+
+This avoids serializing the complete historical reports every five seconds on long-running projects. It does not change or delete source reports, research runs or conversations. Read-only requests have a bounded wait and retain the last known client state on failure. A native observation error cannot replace the current conversation with a false empty session list or discard its draft. The Windows dashboard lifecycle log records small memory counters every 30 seconds, without recording prompts or environment variables. These changes reduce application memory peaks; they cannot provide a guarantee against system-wide virtual-memory exhaustion.

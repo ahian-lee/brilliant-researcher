@@ -73,9 +73,16 @@ try{
   const api=await server.ssrLoadModule('/src/workbenchApi.ts');
   const calls=[];
   globalThis.fetch=async(url,init)=>{calls.push({url,init});return {ok:true,json:async()=>({accepted:true})};};
+  const legacyApi=await server.ssrLoadModule('/src/api.ts');
+  await legacyApi.fetchOverview('fixture');
+  assert.ok(calls[0].url.includes('summary=1'),'Normal project polling must never request the full repeated historical reports');
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  calls.length=0;
   await api.fetchWorkbenchProject('fixture');
   await api.sendWorkbenchMessage('fixture','executor','User instruction');
   assert.ok(calls[0].init.signal instanceof AbortSignal,'Read requests have an observation timeout');
   assert.equal(calls[1].init.signal,undefined,'Do not time out and implicitly retry task submissions');
+  globalThis.fetch=async()=>({ok:true,json:async()=>({error:'Native observation unavailable',sessions:[]})});
+  await assert.rejects(api.fetchWorkbenchProject('fixture'),/Native observation unavailable/,'An observation error must retain prior workspace state through useAsync, never replace it with a false empty list');
   console.log('PASS: shared live session evidence, silence vs liveness, maintenance, readable provider faults, human/automatic requests, stale observations, actionable blockers, bilingual safe rendering and read-only timeouts; no model calls');
 }finally{globalThis.fetch=originalFetch;await server.close();}

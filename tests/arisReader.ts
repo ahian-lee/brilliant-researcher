@@ -73,6 +73,14 @@ const reader = new ArisReader([
   { id: 'aris-other', root: otherRoot, name: 'ARIS other' },
 ]);
 const overview = reader.overview('aris-main');
+const summary = reader.overview('aris-main', {summary:true});
+assert.deepEqual(summary.focus,overview.focus,'Progress, accepted stages, blockers and questions must survive lightweight polling unchanged');
+assert.deepEqual(summary.project,overview.project);
+assert.deepEqual(summary.counts,overview.counts);
+assert.deepEqual(summary.tasks,[]);
+assert.deepEqual(summary.decisions,[]);
+assert.equal(summary.nativeReport,null);
+assert.ok(reader.overview('aris-main').tasks.length>0,'Detailed history is still available on demand');
 const done = overview.tasks.find((task) => task.phase === 'plan');
 const accepted = overview.tasks.find((task) => task.phase === 'review');
 const unsafe = overview.tasks.find((task) => task.phase === 'unsafe');
@@ -240,6 +248,13 @@ const changedOverview = manyReader.overview('many');
 assert.equal(changedOverview.project.human_question_count, 1, 'new questions appear on the next request');
 assert.ok(changedOverview.tasks.every(task => task.artifacts.some(artifact => artifact.content === 'Updated shared report')));
 assert.equal(manyReader.listProjects()[0].human_question_count, 1);
+writeFileSync(reportPath, 'Report evidence '.repeat(10_000));
+const largeDetails = manyReader.overview('many');
+const smallProgress = manyReader.overview('many',{summary:true});
+assert.deepEqual(smallProgress.focus,largeDetails.focus);
+assert.deepEqual(smallProgress.project,largeDetails.project);
+assert.ok(Buffer.byteLength(JSON.stringify(smallProgress)) < Buffer.byteLength(JSON.stringify(largeDetails))/10,'Normal polling is bounded by progress rather than repeated historical report bodies');
+assert.ok(largeDetails.tasks.every(task=>task.artifacts.some(artifact=>artifact.content?.startsWith('Report evidence '))),'Original reports remain intact in explicit detailed reads');
 console.log(`ARIS shared report read regression passed: ${reportReads} report read, ${runReads} run reads for 12 rounds; fresh reports/questions on next request`);
 
 

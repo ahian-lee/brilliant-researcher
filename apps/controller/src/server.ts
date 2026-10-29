@@ -265,11 +265,11 @@ function announce(kind: string, refId: string): void {
   broadcast('change', { kind, ref_id: refId });
 }
 
-app.get<{ Querystring: { projectId?: string } }>('/api/overview', async (req, reply) => {
+app.get<{ Querystring: { projectId?: string; summary?: string } }>('/api/overview', async (req, reply) => {
   const projectId = guardProject(req.query.projectId, reply);
   if (!projectId) return undefined;
   if (arisReader.hasProject(projectId)) {
-    const overview = arisReader.overview(projectId);
+    const overview = arisReader.overview(projectId, { summary: req.query.summary !== '0' });
     const workbenchControl = workbench?.control(workbench.project(projectId));
     if (workbench && workbenchControl) {
       try {

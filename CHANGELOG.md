@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- Use a lightweight ARIS overview for routine progress polling; keep complete historical reports available on explicit reads, and record bounded dashboard memory diagnostics without prompt/environment contents.
+
 - Make native agent feedback consistent between the overview and conversation, including tool activity, context compaction, last text/event age, and independently timestamped status reads.
 - Surface provider quota/authentication failures and collaboration errors in actionable blockers; separate unreadable waiting states from answerable human requests.
 - Add read-only refresh timeouts, visible direction/pause controls and a jump-to-latest option that preserves the reading position. Keep project settings, budgets and exports in one disclosure.

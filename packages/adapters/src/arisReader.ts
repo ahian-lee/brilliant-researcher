@@ -405,7 +405,7 @@ export class ArisReader {
     return [...this.projectsById.keys()].map((projectId) => this.project(projectId));
   }
 
-  overview(projectId: string): {
+  overview(projectId: string, options: { summary?: boolean } = {}): {
     project: ArisReaderProject;
     tasks: ArisTaskRow[];
     host: null;
@@ -419,7 +419,9 @@ export class ArisReader {
     focus: ReturnType<typeof buildResearchFocus>;
   } {
     const runs = this.readRuns(projectId);
-    const tasks = runs.flatMap((run) => run.phases.map((phase) => this.task(projectId, run, phase)));
+    // Polling progress must not serialize the same full reports for every
+    // historical phase. Detailed records remain available through explicit reads.
+    const tasks = options.summary ? [] : runs.flatMap((run) => run.phases.map((phase) => this.task(projectId, run, phase)));
     const counts = new Map<string, number>();
     for (const run of runs) counts.set(run.status, (counts.get(run.status) ?? 0) + 1);
     const latestRun = [...runs].sort((a,b)=>(b.updated ?? '').localeCompare(a.updated ?? '')).at(0);
@@ -435,10 +437,10 @@ export class ArisReader {
       inbox: [],
       counts: [...counts.entries()].map(([status, n]) => ({ status, n })),
       supervisorUpdates: [],
-      decisions: this.decisions(projectId, runs),
+      decisions: options.summary ? [] : this.decisions(projectId, runs),
       lastChangeSeq: 0,
       source: 'aris',
-      nativeReport: latestRun?.artifacts.find(a=>a.path === 'REPORT.md')?.content ?? latestRun?.artifacts.find(a=>a.kind === 'report')?.content ?? latestRun?.review_log ?? null,
+      nativeReport: options.summary ? null : latestRun?.artifacts.find(a=>a.path === 'REPORT.md')?.content ?? latestRun?.artifacts.find(a=>a.kind === 'report')?.content ?? latestRun?.review_log ?? null,
       focus,
     };
   }

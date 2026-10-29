@@ -12,9 +12,10 @@ import type {
 const BASE = '/api';
 
 async function request<T>(path: string): Promise<T> {
+  const signal = AbortSignal.timeout(20_000);
   let res: Response;
   try {
-    res = await fetch(`${BASE}${path}`, { headers: { accept: 'application/json' } });
+    res = await fetch(`${BASE}${path}`, { signal, headers: { accept: 'application/json' } });
   } catch {
     throw new Error('无法连接看板数据服务。请确认看板已启动；连接恢复后页面会自动重试。');
   }
@@ -33,7 +34,7 @@ function scopedPath(path: string, projectId?: string | null): string {
 export const fetchProjects = (): Promise<ProjectsPayload> => request<ProjectsPayload>('/projects');
 
 export const fetchOverview = (projectId?: string | null): Promise<Overview> =>
-  request<Overview>(scopedPath('/overview', projectId));
+  request<Overview>(scopedPath('/overview?summary=1', projectId));
 
 export const fetchResults = (projectId?: string | null): Promise<ResultsPayload> =>
   request<ResultsPayload>(scopedPath('/results', projectId));

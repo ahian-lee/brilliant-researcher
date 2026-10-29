@@ -286,7 +286,7 @@ export class ResearchWorkbench {
       const skill = this.skill(control.workflow);
       workflows.push({ id: `selected:${skill.id}`, skillId: skill.id, name: skill.title || skill.name, status: 'pending', runId: null, updatedAt: control.createdAt, steps: [], summary: '已选择此流程，等待执行者写入 ARIS 阶段记录。' } as any);
     }
-    return { ...content, iterationStages: this.iterationStages(id), continuation: this.continuation(id), focus: new ArisReader([project]).overview(id).focus, collaboration: this.collaborationStatus?.(id) ?? null, workflows, figures, sessions, control: control ? { ...control, error: connectionError ?? control.error } : undefined, ...(connectionError ? { error: connectionError } : {}) };
+    return { ...content, iterationStages: this.iterationStages(id), continuation: this.continuation(id), focus: new ArisReader([project]).overview(id,{summary:true}).focus, collaboration: this.collaborationStatus?.(id) ?? null, workflows, figures, sessions, control: control ? { ...control, error: connectionError ?? control.error } : undefined, ...(connectionError ? { error: connectionError } : {}) };
   }
   private register(project: ArisProjectRegistration): void {
     const file = resolve(this.options.repoRoot, this.options.registryFile);
@@ -468,7 +468,7 @@ export class ResearchWorkbench {
         if(previous.answer !== answer) throw new WorkbenchError('这项问题已回答；如需改变决定，请在对话中发送新的方向',409);
         return { accepted: true, decision: previous, duplicate: true };
       }
-      const focus = new ArisReader([project]).overview(id).focus;
+      const focus = new ArisReader([project]).overview(id,{summary:true}).focus;
       if (focus.pipeline_run_id !== runId) throw new WorkbenchError('研究轮次已变化，请刷新后查看当前问题', 409);
       const question = focus.questions.find(q => q.id === questionId);
       if (!question) throw new WorkbenchError('该问题已结束或不再等待回答，请刷新', 409);
@@ -489,7 +489,7 @@ export class ResearchWorkbench {
   }
   async attentionCounts() {
     const rows = await Promise.all(loadArisProjectRegistrations(this.options.registryFile, this.options.repoRoot).filter(p => !p.completed_at).map(async project => {
-      const questions = new ArisReader([project]).overview(project.id).focus.questions.length;
+      const questions = new ArisReader([project]).overview(project.id,{summary:true}).focus.questions.length;
       if (!this.control(project)) return [project.id, {human: questions, automatic: 0}];
       try {
         // Sidebar counts need pending requests, not full histories from every project.
@@ -553,7 +553,7 @@ export class ResearchWorkbench {
   }
   recordContinuation(id:string,sessionId:string,message:string,affectedStages?:string[]) {
     const project=this.project(id),control=this.control(project)!;
-    const focus=new ArisReader([project]).overview(id).focus;
+    const focus=new ArisReader([project]).overview(id,{summary:true}).focus;
     const active=focus.stages.filter(s=>!['accepted','skipped'].includes(s.status));
     control.continuation={state:'running',reason:message.slice(0,500),updatedAt:new Date().toISOString(),sessionId,
       affectedStages:affectedStages??(active.length?active.map(s=>s.id):focus.stages.filter(s=>s.status!=='skipped').map(s=>s.id))};

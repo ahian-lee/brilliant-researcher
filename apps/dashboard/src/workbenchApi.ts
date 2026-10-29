@@ -83,8 +83,13 @@ export const createWorkbenchSession = (
 ): Promise<CreateWorkbenchSessionResponse> =>
   post(`/projects/${encodeURIComponent(projectId)}/sessions`, payload);
 
-export const fetchWorkbenchProject = (projectId: string): Promise<WorkbenchProjectOverview> =>
-  request(`/projects/${encodeURIComponent(projectId)}`);
+export const fetchWorkbenchProject = async (projectId: string): Promise<WorkbenchProjectOverview> => {
+  const workspace = await request<WorkbenchProjectOverview>(`/projects/${encodeURIComponent(projectId)}`);
+  // A failed native observation is not an authoritative empty session list.
+  // Reject it so useAsync retains the prior workspace and conversation draft.
+  if (workspace.error) throw new Error(workspace.error);
+  return workspace;
+};
 
 export const startWorkbenchCollaboration = (projectId: string, payload: { task: string; provider: string; model?: string; thinkingOptionId?: string }): Promise<WorkbenchCollaborationRun> =>
   post(`/projects/${encodeURIComponent(projectId)}/collaboration/start`, payload);

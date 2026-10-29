@@ -15,7 +15,7 @@
     "build": "vite build apps/dashboard",
     "codex:verify": "node integrations/codex/verify-codex.mjs",
     "test:workflow": "node tests/workflowQueue.ts && node tests/codexSupervisorHost.ts",
-    "test:dashboard": "node tests/researchFocus.ts && node tests/agentSessions.ts && node tests/arisReader.ts && node tests/arisObserverReload.mjs",
+    "test:dashboard": "node tests/researchFocus.ts && node tests/agentSessions.ts && node tests/arisReader.ts && node tests/arisObserverReload.mjs && node tests/overviewPolling.mjs",
     "test:workbench": "node tests/arisWorkspace.ts && node tests/researchWorkbench.ts && node tests/projectExport.ts && node tests/dshReadiness.ts && node tests/approvalCoordinator.ts && node tests/feishuNotifier.ts && node tests/nativeRuntime.ts && node tests/collaborationLoop.ts && node tests/iterationPlanning.ts && node tests/workbenchCollaboration.ts && node tests/workbenchRevisionRecovery.ts && node tests/nativeDshDriver.ts && node tests/nativeCodex.ts && node tests/reviewerSelection.ts && node tests/projectBudget.ts && node tests/nativeReliability.ts && node tests/nativeCollaboration.ts && node tests/collaborationReliability.ts && node tests/projectTickIsolation.ts && node tests/nativeCollaborationRecovery.ts && node tests/workbenchCollaborationReliability.ts && node tests/arisStageAcceptance.ts && node tests/nativeDispatchBoundary.ts && node tests/nativeStorage.ts && node tests/nativeRestartRecovery.ts",
     "setup": "node scripts/setup.mjs",
     "start": "node scripts/start.mjs",

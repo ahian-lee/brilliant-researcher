@@ -243,7 +243,7 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
       if(event.type==='accepted' && options.recordAris!==false){
         const control=workbench.control(project)!;
         const affected=control.continuation?.affectedStages??[];
-        if(!affected.length){publishBriefing(id,run,new ArisReader([project]).overview(id).focus.pipeline_run_id??'',acceptance);return;}
+        if(!affected.length){publishBriefing(id,run,new ArisReader([project]).overview(id,{summary:true}).focus.pipeline_run_id??'',acceptance);return;}
         // The startup follow-up is a fallback until the executor identifies
         // its real, newly-created ARIS run. Review the delivered run itself.
         const deliveredNativeId=actualRun(root,run);
@@ -264,7 +264,7 @@ export function connectCollaborations(workbench: ResearchWorkbench, options: { r
         acceptance=await acceptDelivered(id,nativeId!,run,action!.id,affected,receipts);
         acceptedNativeId=nativeId;
       }
-      publishBriefing(id,run,acceptedNativeId??new ArisReader([project]).overview(id).focus.pipeline_run_id??(affected.length?followupId:''),acceptance);
+      publishBriefing(id,run,acceptedNativeId??new ArisReader([project]).overview(id,{summary:true}).focus.pipeline_run_id??(affected.length?followupId:''),acceptance);
       return;
     }
     const priorId=(()=>{try{return JSON.parse(readFileSync(scoped(root,'.aris/progress.json'),'utf8')).run_id;}catch{return undefined;}})();

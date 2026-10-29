@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, writeFileSync, createWriteStream } from 'nod
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Console } from 'node:console';
+import { getHeapStatistics } from 'node:v8';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const projects = resolve(process.argv[2] || resolve(root, 'var/aris-projects.local.json'));
@@ -23,6 +24,15 @@ if (process.env.BRI_DASHBOARD_MANAGED !== '1') {
   writeFileSync(resolve(logs, `dashboard-${port}-child.json`), JSON.stringify({ pid: process.pid }));
 }
 log(`research workbench started pid=${process.pid} port=${port}; legacy remote execution disabled`);
+// Small lifecycle measurements make the next allocation failure diagnosable
+// without recording prompts, credentials, reports or process environment.
+const logMemory = () => {
+  const memory = process.memoryUsage();
+  const mb = bytes => Math.round(bytes / 1048576);
+  log(`memory pid=${process.pid} rssMB=${mb(memory.rss)} heapUsedMB=${mb(memory.heapUsed)} heapTotalMB=${mb(memory.heapTotal)} externalMB=${mb(memory.external)} heapLimitMB=${mb(getHeapStatistics().heap_size_limit)}`);
+};
+logMemory();
+setInterval(logMemory, 30_000).unref();
 process.on('exit', code => log(`read-only server exited pid=${process.pid} code=${code}`));
 process.on('uncaughtExceptionMonitor', error => log(`uncaught: ${error.stack || error}`));
 try {
