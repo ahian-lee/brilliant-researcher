@@ -12,7 +12,7 @@ const originalFetch=globalThis.fetch;
 let requests=0;
 globalThis.fetch=()=>{requests++;throw Error('Status presentation must not contact a model');};
 try{
-  const {sessionSignal}=await server.ssrLoadModule('/src/sessionSignal.ts');
+  const {sessionSignal,activityDetail}=await server.ssrLoadModule('/src/sessionSignal.ts');
   const {SessionPulse}=await server.ssrLoadModule('/src/components/SessionPulse.tsx');
   const {I18nProvider,translate,translations}=await server.ssrLoadModule('/src/i18n.tsx');
   const {ProjectOverview}=await server.ssrLoadModule('/src/components/ProjectOverview.tsx');
@@ -21,6 +21,10 @@ try{
   const session={id:'executor',provider:'dsh-pi',title:'Existing conversation',status:'running',lastMessageAt:at};
   const operation={id:'command',tool:'commandExecution',summary:'python experiment.py',status:'running',at};
   const detail={session,messages:[],activity:[operation],approvals:[],activeTurn:{status:'running'}};
+  const nativePwsh={...operation,tool:'pwsh',summary:'运行命令',description:JSON.stringify({command:'Get-Process -Id 1234',description:'Inspect a running experiment'})};
+  assert.equal(activityDetail(nativePwsh).text,'Get-Process -Id 1234','Generic native tool summaries must reveal the actual command arguments');
+  assert.equal(activityDetail(nativePwsh).intent,'Inspect a running experiment');
+  assert.equal(activityDetail({...operation,description:'not JSON'}).text,operation.summary);
   const signal=sessionSignal(session,detail,now);
   assert.equal(signal.kind,'tool');
   assert.equal(signal.quiet,true,'Silence remains a running operation, never a failed or stopped process');

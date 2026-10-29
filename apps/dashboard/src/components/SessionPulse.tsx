@@ -1,5 +1,5 @@
 import { useI18n } from '../i18n';
-import { sessionSignal } from '../sessionSignal';
+import { activityDetail, sessionSignal } from '../sessionSignal';
 import type { WorkbenchSession, WorkbenchSessionDetail } from '../workbenchTypes';
 
 export function elapsedLabel(milliseconds: number): { key: string; value: number } {
@@ -18,11 +18,12 @@ export function SessionPulse({ session, detail, now, observedAt, readError, refr
   const stale = observed > 0 && now - observed > 30_000;
   const age = signal.age === null ? null : elapsedLabel(signal.age);
   const current = signal.active ?? signal.recent;
+  const operation = current ? activityDetail(current) : undefined;
   const canRespond = signal.kind === 'human';
   return <section className={`wb-pulse is-${signal.kind}${signal.quiet ? ' is-quiet' : ''}`} aria-label={t('会话实时反馈')} data-signal={signal.kind} data-quiet={signal.quiet}>
     <div className="wb-pulse-heading"><span className="wb-pulse-dot" aria-hidden="true"/><strong>{t(signal.label)}</strong><span className="wb-pulse-age">{age ? <time dateTime={new Date(signal.latestAt).toISOString()} title={new Date(signal.latestAt).toLocaleString(locale)}>{t('最近反馈 · {0}', { 0: t(age.key, { 0: age.value }) })}</time> : t('暂无活动时间')}</span></div>
     <p className="wb-pulse-hint">{t(signal.hint)}</p>
-    {current ? <div className="wb-pulse-operation"><small>{signal.active ? t('当前操作') : t('最后记录的操作')}</small><code>{current.target || current.summary}</code>{signal.active?.at ? <small>{t('开始于 {0}', { 0: new Date(signal.active.at).toLocaleTimeString(locale) })}</small> : null}</div> : null}
+    {operation ? <div className="wb-pulse-operation"><small>{signal.active ? t('当前操作') : t('最后记录的操作')}</small>{operation.intent ? <span>{operation.intent}</span> : null}<code>{operation.text}</code>{signal.active?.at ? <small>{t('开始于 {0}', { 0: new Date(signal.active.at).toLocaleTimeString(locale) })}</small> : null}</div> : null}
     {signal.note && !['error', 'unavailable'].includes(signal.kind) ? <p className="wb-pulse-note"><span>{t('最近文字反馈')}</span>{signal.note.length > 220 ? `${signal.note.slice(0, 220)}…` : signal.note}</p> : null}
     {signal.quiet ? <p className="wb-pulse-warning" role="status">{t('有一段时间没有新输出；这不代表进程停止。可先刷新状态，仍无进展时再暂停协作并说明如何继续。')}</p> : null}
     {signal.error ? <details className="wb-pulse-error" open><summary>{t('具体错误')}</summary><pre>{signal.error}</pre></details> : null}

@@ -16,8 +16,15 @@ export function activityLabel(item: SessionActivity): string {
   if (/read|open_file/.test(tool)) return '正在读取文件';
   if (/edit|write|patch|filechange/.test(tool)) return '正在修改文件';
   if (/search|grep|glob|find/.test(tool)) return '正在检索资料';
-  if (/bash|shell|command|exec/.test(tool)) return '正在执行命令';
+  if (/bash|shell|command|exec|pwsh|terminal/.test(tool)) return '正在执行命令';
   return '正在调用工具';
+}
+
+export function activityDetail(item: SessionActivity): { text: string; intent?: string } {
+  let args: Record<string, unknown> | undefined;
+  try { const value = JSON.parse(item.description || ''); if (value && typeof value === 'object' && !Array.isArray(value)) args = value; } catch { /* Plain tool descriptions remain available in the activity history. */ }
+  const text = [args?.command, item.target, args?.path, args?.query, args?.pattern, item.summary].find(value => typeof value === 'string' && value.trim());
+  return { text: typeof text === 'string' ? text : item.summary, intent: typeof args?.description === 'string' ? args.description : undefined };
 }
 
 /** Event age measures feedback silence, never process liveness or completion. */
