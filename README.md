@@ -2,7 +2,7 @@
 
 **An agent researcher built on ARIS, with a local workbench for execution, independent review, and continued iteration.**
 
-[中文](README_CN.md) · [Workbench guide](docs/research-workbench.md) · [Architecture](docs/architecture.md)
+[中文](README_CN.md) · [Research results](docs/research-results.md#english) · [Workbench guide](docs/research-workbench.md) · [Architecture](docs/architecture.md)
 
 ![Brilliant Researcher workbench: stage progress, DSH execution, Codex review, and project conversation](docs/images/workbench-en.png)
 

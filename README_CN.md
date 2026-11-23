@@ -2,7 +2,7 @@
 
 **基于 ARIS 的 agent researcher：用本地工作台连接执行、独立审核和持续迭代。**
 
-[English](README.md) · [工作台使用说明](docs/research-workbench_CN.md) · [架构](docs/architecture_CN.md)
+[English](README.md) · [研究结果](docs/research-results.md) · [工作台使用说明](docs/research-workbench_CN.md) · [架构](docs/architecture_CN.md)
 
 ![Brilliant Researcher 工作台：阶段进度、DSH 执行、Codex 审核与项目对话](docs/images/workbench-zh.png)
 
